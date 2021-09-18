@@ -1331,6 +1331,7 @@ func zipzipzip(zipFilePath string, tmpDir string) error {
 	defer archive.Close()
 	zipWriter := zip.NewWriter(archive)
 	files, err := os.ReadDir(tmpDir)
+	fmt.Println(files)
 	if err != nil {
 		return err
 	}
@@ -1338,7 +1339,7 @@ func zipzipzip(zipFilePath string, tmpDir string) error {
 		if v.IsDir() {
 			continue
 		}
-		f, err := os.Open(v.Name())
+		f, err := os.Open(tmpDir + v.Name())
 		if err != nil {
 			return err
 		}
@@ -1350,7 +1351,6 @@ func zipzipzip(zipFilePath string, tmpDir string) error {
 		if _, err := io.Copy(w, f); err != nil {
 			return err
 		}
-		zipWriter.Close()
 	}
 
 	fmt.Println("closing zip archive...")
@@ -1378,8 +1378,8 @@ func createSubmissionsZip(zipFilePath string, classID string, submissions []Subm
 	}
 
 	// -i 'tmpDir/*': 空zipを許す
-	return zipzipzip(zipFilePath, tmpDir)
-	// return exec.Command("zip", "-j", "-r", zipFilePath, tmpDir, "-i", tmpDir+"*").Run()
+	// return zipzipzip(zipFilePath, tmpDir)
+	return exec.Command("zip", "-j", "-r", zipFilePath, tmpDir, "-i", tmpDir+"*").Run()
 }
 
 // ---------- Announcement API ----------
