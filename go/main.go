@@ -1050,7 +1050,8 @@ func (h *handlers) SetCourseStatus(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-	if _, err := rdb1.Set(c.Request().Context(), courseID, req.Status, 0).Result(); err != nil {
+	if _, err := rdb1.Set(c.Request().Context(), courseID, string(req.Status), 0).Result(); err != nil {
+		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	return c.NoContent(http.StatusOK)
@@ -1233,6 +1234,10 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 			}
 			if status != StatusInProgress {
 				return c.String(http.StatusBadRequest, "This course is not in progress.")
+			}
+			_, err = rdb1.Set(c.Request().Context(), courseID, StatusInProgress, 0).Result()
+			if err != nil {
+				c.Logger().Error(err)
 			}
 		}
 		return c.NoContent(http.StatusInternalServerError)
