@@ -1321,13 +1321,12 @@ func (h *handlers) DownloadSubmittedAssignments(c echo.Context) error {
 
 	return c.File(zipFilePath)
 }
-
 func createSubmissionsZip(zipFilePath string, classID string, submissions []Submission) error {
 	tmpDir := AssignmentsDirectory + classID + "/"
-	if err := exec.Command("rm", "-rf", tmpDir).Run(); err != nil {
+	if err := os.RemoveAll(tmpDir); err != nil {
 		return err
 	}
-	if err := exec.Command("mkdir", tmpDir).Run(); err != nil {
+	if err := os.Mkdir(tmpDir, 0755); err != nil {
 		return err
 	}
 
