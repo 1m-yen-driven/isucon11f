@@ -638,6 +638,14 @@ type CourseResultWithMyTotalScore struct {
 	myTotalScore int
 }
 
+type CourseToukei struct {
+	CourseID string `db:"course_id"`
+	Max int `db:"max"`
+	Min int `db:"min"`
+	Avg float64 `db:"avg"`
+	Std float64 `db:"std"`
+}
+
 // GetGrades GET /api/users/me/grades 成績取得
 func (h *handlers) GetGrades(c echo.Context) error {
 	userID, _, _, err := getUserInfo(c)
@@ -703,29 +711,34 @@ func (h *handlers) GetGrades(c echo.Context) error {
 		}
 		classDict[cinc] = classScores
 	}
+	var totals []CourseToukei
+	query = " SELECT `k`.`course_id` AS `course_id`, COALESCE(MAX(`k`.`score`), 0) AS `max`, COALESCE(MIN(`k`.`score`), 0) AS `min`, COALESCE(AVG(CAST(`k`.`score` AS DECIMAL(10,5))), 0) AS `avg`, COALESCE(STD(CAST(`k`.`score` AS DECIMAL(10,5))), 0) AS `std` FROM (SELECT IFNULL(SUM(`submissions`.`score`), 0) AS `score`, `registrations`.`course_id` AS `course_id`" +
+		" FROM `registrations`" +
+		" LEFT JOIN `classes` ON `registrations`.`course_id` = `classes`.`course_id`" +
+		" LEFT JOIN `submissions` ON `registrations`.`user_id` = `submissions`.`user_id` AND `submissions`.`class_id` = `classes`.`id`" +
+		" GROUP BY `registrations`.`user_id`, `registrations`.`course_id`) `k` GROUP BY `k`.`course_id`"
+	if err := h.DB.Select(&totals, query); err != nil {
+		c.Logger().Error(err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	toukeiDict := make(map[string]CourseToukei)
+	for _, total := range totals {
+		toukeiDict[total.CourseID] = total
+	}
 	for cinc, res := range classDict {
 		// この科目を履修している学生のTotalScore一覧を取得
-		var totals []int
-		query := "SELECT IFNULL(SUM(`submissions`.`score`), 0) AS `total_score`" +
-			" FROM `users`" +
-			" JOIN `registrations` ON `users`.`id` = `registrations`.`user_id`" +
-			" JOIN `courses` ON `registrations`.`course_id` = `courses`.`id`" +
-			" LEFT JOIN `classes` ON `courses`.`id` = `classes`.`course_id`" +
-			" LEFT JOIN `submissions` ON `users`.`id` = `submissions`.`user_id` AND `submissions`.`class_id` = `classes`.`id`" +
-			" WHERE `courses`.`id` = ?" +
-			" GROUP BY `users`.`id`"
-		if err := h.DB.Select(&totals, query, cinc.ID); err != nil {
-			c.Logger().Error(err)
-			return c.NoContent(http.StatusInternalServerError)
+		tScore := float64(50)
+		if toukeiDict[cinc.ID].Std != 0 {
+			tScore  = (float64(res.myTotalScore)-toukeiDict[cinc.ID].Avg)/toukeiDict[cinc.ID].Std*10 + 50
 		}
 		courseResults = append(courseResults, CourseResult{
 			Name:             cinc.Name,
 			Code:             cinc.Code,
 			TotalScore:       res.myTotalScore,
-			TotalScoreTScore: tScoreInt(res.myTotalScore, totals),
-			TotalScoreAvg:    averageInt(totals, 0),
-			TotalScoreMax:    maxInt(totals, 0),
-			TotalScoreMin:    minInt(totals, 0),
+			TotalScoreTScore: tScore,
+			TotalScoreAvg:    toukeiDict[cinc.ID].Avg,
+			TotalScoreMax:    toukeiDict[cinc.ID].Max,
+			TotalScoreMin:    toukeiDict[cinc.ID].Min,
 			ClassScores:      res.classScores,
 		})
 
