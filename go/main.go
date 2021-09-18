@@ -1,9 +1,19 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/go-redis/redis/v8"
+	"github.com/go-sql-driver/mysql"
+	"github.com/gorilla/sessions"
+	"github.com/jmoiron/sqlx"
+	"github.com/labstack/echo-contrib/session"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+	"github.com/shamaton/msgpack"
+	"golang.org/x/crypto/bcrypt"
 	"io"
 	"log"
 	"net/http"
@@ -15,14 +25,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-
-	"github.com/go-sql-driver/mysql"
-	"github.com/gorilla/sessions"
-	"github.com/jmoiron/sqlx"
-	"github.com/labstack/echo-contrib/session"
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
-	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -42,6 +44,29 @@ type UserSession struct {
 	UserName string
 	IsAdmin  bool
 }
+
+type UnreadAnnouncements struct {
+	AnnouncementID string `db:"announcement_id"`
+	UserID         string `db:"user_id"`
+	IsDeleted      bool   `db:"is_deleted"`
+}
+
+// Encode / Decode
+func EncodePtr(valuePtr interface{}) string {
+	d, _ := msgpack.Encode(valuePtr)
+	return string(d)
+}
+func DecodePtrStringCmd(input *redis.StringCmd, valuePtr interface{}) {
+	msgpack.Decode([]byte(input.Val()), valuePtr)
+}
+func DecodePtrSliceCmdElem(partsOfSliceCmd interface{}, valuePtr interface{}) {
+	msgpack.Decode([]byte(partsOfSliceCmd.(string)), valuePtr)
+}
+
+var rdb0 = redis.NewClient(&redis.Options{
+	Addr: "10.11.7.103:6379",
+	DB:   0, // 0 - 15
+})
 
 var sessionCache = sync.Map{}
 
@@ -132,6 +157,9 @@ func (h *handlers) Initialize(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+
+	ctx := context.Background()
+	rdb0.FlushDB(ctx)
 	// アプリ複数台のときは初期化されないことがないか気をつけること
 	sessionCache = sync.Map{}
 	res := InitializeResponse{
@@ -626,15 +654,15 @@ type ClassWithCourse struct {
 }
 
 type classIdNameCode struct {
-	ID string
-	Name string
-	Code string
+	ID     string
+	Name   string
+	Code   string
 	Status CourseStatus
 	Credit uint8
 }
 
 type CourseResultWithMyTotalScore struct {
-	classScores []ClassScore
+	classScores  []ClassScore
 	myTotalScore int
 }
 
