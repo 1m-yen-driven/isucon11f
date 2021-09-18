@@ -57,6 +57,7 @@ CREATE TABLE `classes`
 CREATE TABLE `submissions`
 (
     `user_id`   CHAR(26)     NOT NULL,
+    `user_code`      CHAR(6) NOT NULL,
     `class_id`  CHAR(26)     NOT NULL,
     `file_name` VARCHAR(255) NOT NULL,
     `score`     TINYINT UNSIGNED,
