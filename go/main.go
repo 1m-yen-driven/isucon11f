@@ -75,6 +75,12 @@ var rdb1 = redis.NewClient(&redis.Options{
 	DB:   1, // 0 - 15
 })
 
+// key: classID value, status
+var rdb2 = redis.NewClient(&redis.Options{
+	Addr: "10.11.7.103:6379",
+	DB:   2, // 0 - 15
+})
+
 var sessionCache = sync.Map{}
 
 func main() {
@@ -183,6 +189,9 @@ func (h *handlers) Initialize(c echo.Context) error {
 
 	{
 		rdb1.FlushDB(ctx)
+	}
+	{
+		rdb2.FlushDB(ctx)
 	}
 	// アプリ複数台のときは初期化されないことがないか気をつけること
 	sessionCache = sync.Map{}
@@ -1232,10 +1241,10 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 			} else if err == sql.ErrNoRows {
 				return c.String(http.StatusNotFound, "No such course.")
 			}
+			_, err = rdb1.Set(c.Request().Context(), courseID, StatusInProgress, 0).Result()
 			if status != StatusInProgress {
 				return c.String(http.StatusBadRequest, "This course is not in progress.")
 			}
-			_, err = rdb1.Set(c.Request().Context(), courseID, StatusInProgress, 0).Result()
 			if err != nil {
 				c.Logger().Error(err)
 			}
@@ -1257,16 +1266,30 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "You have not taken this course.")
 	}
 
-	// 提出期限過ぎてないか
-	var submissionClosed bool
-	if err := tx.Get(&submissionClosed, "SELECT `submission_closed` FROM `classes` WHERE `id` = ? FOR SHARE", classID); err != nil && err != sql.ErrNoRows {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	} else if err == sql.ErrNoRows {
-		return c.String(http.StatusNotFound, "No such class.")
-	}
-	if submissionClosed {
-		return c.String(http.StatusBadRequest, "Submission has been closed for this class.")
+	submissionClosedString, err := rdb2.Get(c.Request().Context(), classID).Result()
+	if err != nil {
+		if err == redis.Nil {
+			var submissionClosed bool
+			if err := tx.Get(&submissionClosed, "SELECT `submission_closed` FROM `classes` WHERE `id` = ? FOR SHARE", classID); err != nil && err != sql.ErrNoRows {
+				c.Logger().Error(err)
+				return c.NoContent(http.StatusInternalServerError)
+			} else if err == sql.ErrNoRows {
+				return c.String(http.StatusNotFound, "No such class.")
+			}
+			_, err = rdb2.Set(c.Request().Context(), classID, strconv.FormatBool(submissionClosed), 0).Result()
+			if err != nil {
+				c.Logger().Error(err)
+				return c.NoContent(http.StatusInternalServerError)
+			}
+			if submissionClosed {
+				return c.String(http.StatusBadRequest, "Submission has been closed for this class.")
+			}
+		}
+	} else {
+		c.Logger().Error("hit close")
+		if submissionClosedString == "true" {
+			return c.String(http.StatusBadRequest, "Submission has been closed for this class.")
+		}
 	}
 
 	file, header, err := c.Request().FormFile("file")
@@ -1389,6 +1412,10 @@ func (h *handlers) DownloadSubmittedAssignments(c echo.Context) error {
 	}
 
 	if _, err := h.DB.Exec("UPDATE `classes` SET `submission_closed` = true WHERE `id` = ?", classID); err != nil {
+		c.Logger().Error(err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	if _, err := rdb2.Set(c.Request().Context(), classID, strconv.FormatBool(true), 0).Result(); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
