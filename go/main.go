@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
@@ -35,6 +36,14 @@ const (
 type handlers struct {
 	DB *sqlx.DB
 }
+
+type UserSession struct {
+	UserID   string
+	UserName string
+	IsAdmin  bool
+}
+
+var sessionCache = sync.Map{}
 
 func main() {
 	go func() { log.Println(http.ListenAndServe(":9009", nil)) }()
@@ -123,7 +132,8 @@ func (h *handlers) Initialize(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-
+	// アプリ複数台のときは初期化されないことがないか気をつけること
+	sessionCache = sync.Map{}
 	res := InitializeResponse{
 		Language: "go",
 	}
@@ -133,62 +143,109 @@ func (h *handlers) Initialize(c echo.Context) error {
 // IsLoggedIn ログイン確認用middleware
 func (h *handlers) IsLoggedIn(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		sess, err := session.Get(SessionName, c)
+		r := c.Request()
+		cookie, err := r.Cookie(SessionName)
 		if err != nil {
-			c.Logger().Error(err)
-			return c.NoContent(http.StatusInternalServerError)
-		}
-		if sess.IsNew {
 			return c.String(http.StatusUnauthorized, "You are not logged in.")
 		}
-		_, ok := sess.Values["userID"]
-		if !ok {
-			return c.String(http.StatusUnauthorized, "You are not logged in.")
+		if _, ok := sessionCache.Load(cookie.Value); ok {
+			return next(c)
+		} else {
+			sess, err := session.Get(SessionName, c)
+			if err != nil {
+				c.Logger().Error(err)
+				return c.NoContent(http.StatusInternalServerError)
+			}
+			if sess.IsNew {
+				return c.String(http.StatusUnauthorized, "You are not logged in.")
+			}
+			iUserID, ok := sess.Values["userID"]
+			if !ok {
+				return c.String(http.StatusUnauthorized, "You are not logged in.")
+			}
+			iUserName, ok := sess.Values["userName"]
+			if !ok {
+				iUserName = ""
+			}
+			iIsAdmin, ok := sess.Values["isAdmin"]
+			if !ok {
+				iIsAdmin = false
+			}
+			user := UserSession{
+				iUserID.(string), iUserName.(string), iIsAdmin.(bool),
+			}
+			sessionCache.Store(cookie.Value, user)
+			return next(c)
 		}
-
-		return next(c)
 	}
 }
 
 // IsAdmin admin確認用middleware
 func (h *handlers) IsAdmin(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		sess, err := session.Get(SessionName, c)
+		r := c.Request()
+		cookie, err := r.Cookie(SessionName)
 		if err != nil {
-			c.Logger().Error(err)
-			return c.NoContent(http.StatusInternalServerError)
-		}
-		isAdmin, ok := sess.Values["isAdmin"]
-		if !ok {
-			c.Logger().Error("failed to get isAdmin from session")
-			return c.NoContent(http.StatusInternalServerError)
-		}
-		if !isAdmin.(bool) {
 			return c.String(http.StatusForbidden, "You are not admin user.")
 		}
-
-		return next(c)
+		if iuser, ok := sessionCache.Load(cookie.Value); ok {
+			user := iuser.(UserSession)
+			if user.IsAdmin {
+				return next(c)
+			} else {
+				return c.String(http.StatusForbidden, "You are not admin user.")
+			}
+		} else {
+			sess, err := session.Get(SessionName, c)
+			if err != nil {
+				c.Logger().Error(err)
+				return c.NoContent(http.StatusInternalServerError)
+			}
+			isAdmin, ok := sess.Values["isAdmin"]
+			if !ok {
+				c.Logger().Error("failed to get isAdmin from session")
+				return c.NoContent(http.StatusInternalServerError)
+			}
+			if !isAdmin.(bool) {
+				return c.String(http.StatusForbidden, "You are not admin user.")
+			}
+			return next(c)
+		}
 	}
 }
 
 func getUserInfo(c echo.Context) (userID string, userName string, isAdmin bool, err error) {
-	sess, err := session.Get(SessionName, c)
+	r := c.Request()
+	cookie, err := r.Cookie(SessionName)
 	if err != nil {
-		return "", "", false, err
+		return "", "", false, errors.New("failed to get userInfo from session")
 	}
-	_userID, ok := sess.Values["userID"]
-	if !ok {
-		return "", "", false, errors.New("failed to get userID from session")
+	if iuser, ok := sessionCache.Load(cookie.Value); ok {
+		val := iuser.(UserSession)
+		return val.UserID, val.UserName, val.IsAdmin, nil
+	} else {
+		sess, err := session.Get(SessionName, c)
+		if err != nil {
+			return "", "", false, err
+		}
+		_userID, ok := sess.Values["userID"]
+		if !ok {
+			return "", "", false, errors.New("failed to get userID from session")
+		}
+		_userName, ok := sess.Values["userName"]
+		if !ok {
+			return "", "", false, errors.New("failed to get userName from session")
+		}
+		_isAdmin, ok := sess.Values["isAdmin"]
+		if !ok {
+			return "", "", false, errors.New("failed to get isAdmin from session")
+		}
+		user := UserSession{
+			_userID.(string), _userName.(string), _isAdmin.(bool),
+		}
+		sessionCache.Store(cookie.Value, user)
+		return _userID.(string), _userName.(string), _isAdmin.(bool), nil
 	}
-	_userName, ok := sess.Values["userName"]
-	if !ok {
-		return "", "", false, errors.New("failed to get userName from session")
-	}
-	_isAdmin, ok := sess.Values["isAdmin"]
-	if !ok {
-		return "", "", false, errors.New("failed to get isAdmin from session")
-	}
-	return _userID.(string), _userName.(string), _isAdmin.(bool), nil
 }
 
 type UserType string
@@ -295,7 +352,12 @@ func (h *handlers) Login(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-
+	r := c.Request()
+	cookie, err := r.Cookie(SessionName)
+	if err == nil {
+		user := UserSession{user.ID, user.Name, user.Type == Teacher}
+		sessionCache.Store(cookie.Value, user)
+	}
 	return c.NoContent(http.StatusOK)
 }
 
@@ -930,16 +992,9 @@ func (h *handlers) SetCourseStatus(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.String(http.StatusBadRequest, "Invalid format.")
 	}
-
-	tx, err := h.DB.Beginx()
-	if err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	defer tx.Rollback()
-
+	// coursesはinsertのみなのでTransactionは不要
 	var count int
-	if err := tx.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ? FOR UPDATE", courseID); err != nil {
+	if err := h.DB.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ? FOR UPDATE", courseID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
@@ -947,16 +1002,10 @@ func (h *handlers) SetCourseStatus(c echo.Context) error {
 		return c.String(http.StatusNotFound, "No such course.")
 	}
 
-	if _, err := tx.Exec("UPDATE `courses` SET `status` = ? WHERE `id` = ?", req.Status, courseID); err != nil {
+	if _, err := h.DB.Exec("UPDATE `courses` SET `status` = ? WHERE `id` = ?", req.Status, courseID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-
-	if err := tx.Commit(); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-
 	return c.NoContent(http.StatusOK)
 }
 
@@ -988,16 +1037,9 @@ func (h *handlers) GetClasses(c echo.Context) error {
 	}
 
 	courseID := c.Param("courseID")
-
-	tx, err := h.DB.Beginx()
-	if err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	defer tx.Rollback()
-
+	// courses は増えることはあっても消えることはないのでTransactionは不要
 	var count int
-	if err := tx.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ?", courseID); err != nil {
+	if err := h.DB.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ?", courseID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
@@ -1011,12 +1053,7 @@ func (h *handlers) GetClasses(c echo.Context) error {
 		" LEFT JOIN `submissions` ON `classes`.`id` = `submissions`.`class_id` AND `submissions`.`user_id` = ?" +
 		" WHERE `classes`.`course_id` = ?" +
 		" ORDER BY `classes`.`part`"
-	if err := tx.Select(&classes, query, userID, courseID); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-
-	if err := tx.Commit(); err != nil {
+	if err := h.DB.Select(&classes, query, userID, courseID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
@@ -1101,6 +1138,24 @@ func (h *handlers) AddClass(c echo.Context) error {
 	return c.JSON(http.StatusCreated, AddClassResponse{ClassID: classID})
 }
 
+func myReadAll(r io.Reader) ([]byte, error) {
+	b := make([]byte, 0, 50_000)
+	for {
+		if len(b) == cap(b) {
+			// Add more capacity (let append pick how much).
+			b = append(b, 0)[:len(b)]
+		}
+		n, err := r.Read(b[len(b):cap(b)])
+		b = b[:len(b)+n]
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+			}
+			return b, err
+		}
+	}
+}
+
 // SubmitAssignment POST /api/courses/:courseID/classes/:classID/assignments 課題の提出
 func (h *handlers) SubmitAssignment(c echo.Context) error {
 	userID, _, _, err := getUserInfo(c)
@@ -1161,17 +1216,20 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	data, err := io.ReadAll(file)
+	data, err := myReadAll(file)
+
 	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	dst := AssignmentsDirectory + classID + "-" + userID + ".pdf"
-	if err := os.WriteFile(dst, data, 0666); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
+	go func() {
+		dst := AssignmentsDirectory + classID + "-" + userID + ".pdf"
+		if err := os.WriteFile(dst, data, 0666); err != nil {
+			c.Logger().Error(err)
+			// return c.NoContent(http.StatusInternalServerError)
+		}
+	}()
 
 	if err := tx.Commit(); err != nil {
 		c.Logger().Error(err)
@@ -1188,6 +1246,11 @@ type Score struct {
 
 // RegisterScores PUT /api/courses/:courseID/classes/:classID/assignments/scores 採点結果登録
 func (h *handlers) RegisterScores(c echo.Context) error {
+	var req []Score
+	if err := c.Bind(&req); err != nil {
+		return c.String(http.StatusBadRequest, "Invalid format.")
+	}
+
 	classID := c.Param("classID")
 
 	tx, err := h.DB.Beginx()
@@ -1207,11 +1270,6 @@ func (h *handlers) RegisterScores(c echo.Context) error {
 
 	if !submissionClosed {
 		return c.String(http.StatusBadRequest, "This assignment is not closed yet.")
-	}
-
-	var req []Score
-	if err := c.Bind(&req); err != nil {
-		return c.String(http.StatusBadRequest, "Invalid format.")
 	}
 
 	for _, score := range req {
@@ -1239,28 +1297,23 @@ type Submission struct {
 // DownloadSubmittedAssignments GET /api/courses/:courseID/classes/:classID/assignments/export 提出済みの課題ファイルをzip形式で一括ダウンロード
 func (h *handlers) DownloadSubmittedAssignments(c echo.Context) error {
 	classID := c.Param("classID")
-
-	tx, err := h.DB.Beginx()
-	if err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	defer tx.Rollback()
-
+	// クラスは増えるのみなのでtx不要
 	var classCount int
-	if err := tx.Get(&classCount, "SELECT COUNT(*) FROM `classes` WHERE `id` = ? FOR UPDATE", classID); err != nil {
+	if err := h.DB.Get(&classCount, "SELECT COUNT(*) FROM `classes` WHERE `id` = ?", classID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	if classCount == 0 {
 		return c.String(http.StatusNotFound, "No such class.")
 	}
+
+	// submission_closed かどうかを観ていないのでtx不要
 	var submissions []Submission
 	query := "SELECT `submissions`.`user_id`, `submissions`.`file_name`, `users`.`code` AS `user_code`" +
 		" FROM `submissions`" +
 		" JOIN `users` ON `users`.`id` = `submissions`.`user_id`" +
 		" WHERE `class_id` = ?"
-	if err := tx.Select(&submissions, query, classID); err != nil {
+	if err := h.DB.Select(&submissions, query, classID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
@@ -1271,12 +1324,7 @@ func (h *handlers) DownloadSubmittedAssignments(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	if _, err := tx.Exec("UPDATE `classes` SET `submission_closed` = true WHERE `id` = ?", classID); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-
-	if err := tx.Commit(); err != nil {
+	if _, err := h.DB.Exec("UPDATE `classes` SET `submission_closed` = true WHERE `id` = ?", classID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
@@ -1443,6 +1491,15 @@ func (h *handlers) AddAnnouncement(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.String(http.StatusBadRequest, "Invalid format.")
 	}
+	// coursesは増えるのみなのでtx不要
+	var count int
+	if err := h.DB.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ?", req.CourseID); err != nil {
+		c.Logger().Error(err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	if count == 0 {
+		return c.String(http.StatusNotFound, "No such course.")
+	}
 
 	tx, err := h.DB.Beginx()
 	if err != nil {
@@ -1450,15 +1507,6 @@ func (h *handlers) AddAnnouncement(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	defer tx.Rollback()
-
-	var count int
-	if err := tx.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ?", req.CourseID); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	if count == 0 {
-		return c.String(http.StatusNotFound, "No such course.")
-	}
 
 	if _, err := tx.Exec("INSERT INTO `announcements` (`id`, `course_id`, `title`, `message`) VALUES (?, ?, ?, ?)",
 		req.ID, req.CourseID, req.Title, req.Message); err != nil {
@@ -1522,13 +1570,8 @@ func (h *handlers) GetAnnouncementDetail(c echo.Context) error {
 
 	announcementID := c.Param("announcementID")
 
-	tx, err := h.DB.Beginx()
-	if err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	defer tx.Rollback()
-
+	// is_deletedにするだけなのでトランザクションは不要
+	// unread_announcements はinsertのみ
 	var announcement AnnouncementDetail
 	query := "SELECT `announcements`.`id`, `courses`.`id` AS `course_id`, `courses`.`name` AS `course_name`, `announcements`.`title`, `announcements`.`message`, NOT `unread_announcements`.`is_deleted` AS `unread`" +
 		" FROM `announcements`" +
@@ -1537,19 +1580,14 @@ func (h *handlers) GetAnnouncementDetail(c echo.Context) error {
 		" JOIN `registrations` AS `r` ON `r`.`course_id` = `courses`.`id` AND `r`.`user_id` = ?" +
 		" WHERE `announcements`.`id` = ?" +
 		" AND `unread_announcements`.`user_id` = ?"
-	if err := tx.Get(&announcement, query, userID, announcementID, userID); err != nil && err != sql.ErrNoRows {
+	if err := h.DB.Get(&announcement, query, userID, announcementID, userID); err != nil && err != sql.ErrNoRows {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	} else if err == sql.ErrNoRows {
 		return c.String(http.StatusNotFound, "No such announcement.")
 	}
 
-	if _, err := tx.Exec("UPDATE `unread_announcements` SET `is_deleted` = true WHERE `announcement_id` = ? AND `user_id` = ?", announcementID, userID); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-
-	if err := tx.Commit(); err != nil {
+	if _, err := h.DB.Exec("UPDATE `unread_announcements` SET `is_deleted` = true WHERE `announcement_id` = ? AND `user_id` = ?", announcementID, userID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
