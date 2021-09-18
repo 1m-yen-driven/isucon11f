@@ -9,6 +9,10 @@ all: clean build ## Cleanup and Build
 build: $(GO_FILES) ## Build executable files
 	@$(COMPILER) build -o $(DEST) -ldflags "-s -w"
 
+.PHONY: cross-compile
+cross-compile: $(GO_FILES)
+	@GOOS=linux GOARCH=amd64 $(COMPILER) build -o $(DEST) -ldflags "-s -w"
+
 .PHONY: clean
 clean: ## Cleanup files
 	@$(RM) -r $(DEST)
