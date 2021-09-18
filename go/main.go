@@ -37,6 +37,12 @@ type handlers struct {
 	DB *sqlx.DB
 }
 
+type UserSession struct {
+	UserID   string
+	UserName string
+	IsAdmin  bool
+}
+
 var sessionCache = sync.Map{}
 
 func main() {
@@ -153,11 +159,22 @@ func (h *handlers) IsLoggedIn(next echo.HandlerFunc) echo.HandlerFunc {
 			if sess.IsNew {
 				return c.String(http.StatusUnauthorized, "You are not logged in.")
 			}
-			userID, ok := sess.Values["userID"]
+			iUserID, ok := sess.Values["userID"]
 			if !ok {
 				return c.String(http.StatusUnauthorized, "You are not logged in.")
 			}
-			sessionCache.Store(cookie.Value, userID)
+			iUserName, ok := sess.Values["userName"]
+			if !ok {
+				iUserName = ""
+			}
+			iIsAdmin, ok := sess.Values["isAdmin"]
+			if !ok {
+				iIsAdmin = false
+			}
+			user := UserSession{
+				iUserID.(string), iUserName.(string), iIsAdmin.(bool),
+			}
+			sessionCache.Store(cookie.Value, user)
 			return next(c)
 		}
 	}
@@ -166,42 +183,69 @@ func (h *handlers) IsLoggedIn(next echo.HandlerFunc) echo.HandlerFunc {
 // IsAdmin admin確認用middleware
 func (h *handlers) IsAdmin(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		sess, err := session.Get(SessionName, c)
+		r := c.Request()
+		cookie, err := r.Cookie(SessionName)
 		if err != nil {
-			c.Logger().Error(err)
-			return c.NoContent(http.StatusInternalServerError)
-		}
-		isAdmin, ok := sess.Values["isAdmin"]
-		if !ok {
-			c.Logger().Error("failed to get isAdmin from session")
-			return c.NoContent(http.StatusInternalServerError)
-		}
-		if !isAdmin.(bool) {
 			return c.String(http.StatusForbidden, "You are not admin user.")
 		}
-
-		return next(c)
+		if iuser, ok := sessionCache.Load(cookie.Value); ok {
+			user := iuser.(UserSession)
+			if user.IsAdmin {
+				return next(c)
+			} else {
+				return c.String(http.StatusForbidden, "You are not admin user.")
+			}
+		} else {
+			sess, err := session.Get(SessionName, c)
+			if err != nil {
+				c.Logger().Error(err)
+				return c.NoContent(http.StatusInternalServerError)
+			}
+			isAdmin, ok := sess.Values["isAdmin"]
+			if !ok {
+				c.Logger().Error("failed to get isAdmin from session")
+				return c.NoContent(http.StatusInternalServerError)
+			}
+			if !isAdmin.(bool) {
+				return c.String(http.StatusForbidden, "You are not admin user.")
+			}
+			return next(c)
+		}
 	}
 }
 
 func getUserInfo(c echo.Context) (userID string, userName string, isAdmin bool, err error) {
-	sess, err := session.Get(SessionName, c)
+	r := c.Request()
+	cookie, err := r.Cookie(SessionName)
 	if err != nil {
-		return "", "", false, err
+		return "", "", false, errors.New("failed to get userInfo from session")
 	}
-	_userID, ok := sess.Values["userID"]
-	if !ok {
-		return "", "", false, errors.New("failed to get userID from session")
+	if iuser, ok := sessionCache.Load(cookie.Value); ok {
+		val := iuser.(UserSession)
+		return val.UserID, val.UserName, val.IsAdmin, nil
+	} else {
+		sess, err := session.Get(SessionName, c)
+		if err != nil {
+			return "", "", false, err
+		}
+		_userID, ok := sess.Values["userID"]
+		if !ok {
+			return "", "", false, errors.New("failed to get userID from session")
+		}
+		_userName, ok := sess.Values["userName"]
+		if !ok {
+			return "", "", false, errors.New("failed to get userName from session")
+		}
+		_isAdmin, ok := sess.Values["isAdmin"]
+		if !ok {
+			return "", "", false, errors.New("failed to get isAdmin from session")
+		}
+		user := UserSession{
+			_userID.(string), _userName.(string), _isAdmin.(bool),
+		}
+		sessionCache.Store(cookie.Value, user)
+		return _userID.(string), _userName.(string), _isAdmin.(bool), nil
 	}
-	_userName, ok := sess.Values["userName"]
-	if !ok {
-		return "", "", false, errors.New("failed to get userName from session")
-	}
-	_isAdmin, ok := sess.Values["isAdmin"]
-	if !ok {
-		return "", "", false, errors.New("failed to get isAdmin from session")
-	}
-	return _userID.(string), _userName.(string), _isAdmin.(bool), nil
 }
 
 type UserType string
@@ -308,7 +352,12 @@ func (h *handlers) Login(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-
+	r := c.Request()
+	cookie, err := r.Cookie(SessionName)
+	if err == nil {
+		user := UserSession{user.ID, user.Name, user.Type == Teacher}
+		sessionCache.Store(cookie.Value, user)
+	}
 	return c.NoContent(http.StatusOK)
 }
 
