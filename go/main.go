@@ -1,9 +1,19 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/go-redis/redis/v8"
+	"github.com/go-sql-driver/mysql"
+	"github.com/gorilla/sessions"
+	"github.com/jmoiron/sqlx"
+	"github.com/labstack/echo-contrib/session"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+	"github.com/shamaton/msgpack"
+	"golang.org/x/crypto/bcrypt"
 	"io"
 	"log"
 	"net/http"
@@ -15,14 +25,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-
-	"github.com/go-sql-driver/mysql"
-	"github.com/gorilla/sessions"
-	"github.com/jmoiron/sqlx"
-	"github.com/labstack/echo-contrib/session"
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
-	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -42,6 +44,29 @@ type UserSession struct {
 	UserName string
 	IsAdmin  bool
 }
+
+type UnreadAnnouncements struct {
+	AnnouncementID string `db:"announcement_id"`
+	UserID         string `db:"user_id"`
+	IsDeleted      bool   `db:"is_deleted"`
+}
+
+// Encode / Decode
+func EncodePtr(valuePtr interface{}) string {
+	d, _ := msgpack.Encode(valuePtr)
+	return string(d)
+}
+func DecodePtrStringCmd(input *redis.StringCmd, valuePtr interface{}) {
+	msgpack.Decode([]byte(input.Val()), valuePtr)
+}
+func DecodePtrSliceCmdElem(partsOfSliceCmd interface{}, valuePtr interface{}) {
+	msgpack.Decode([]byte(partsOfSliceCmd.(string)), valuePtr)
+}
+
+var rdb0 = redis.NewClient(&redis.Options{
+	Addr: "10.11.7.103:6379",
+	DB:   0, // 0 - 15
+})
 
 var sessionCache = sync.Map{}
 
@@ -132,6 +157,23 @@ func (h *handlers) Initialize(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+
+	ctx := context.Background()
+	{
+		unreads := []UnreadAnnouncements{}
+		h.DB.Select(&unreads, "SELECT * FROM `unread_announcements`")
+		rdb0.FlushDB(ctx)
+		pipe := rdb0.Pipeline()
+		defer pipe.Close()
+		for _, unread := range unreads {
+			if unread.IsDeleted {
+				continue
+			}
+			pipe.SAdd(ctx, unread.UserID, unread.AnnouncementID)
+		}
+		pipe.Exec(ctx)
+	}
+
 	// アプリ複数台のときは初期化されないことがないか気をつけること
 	sessionCache = sync.Map{}
 	res := InitializeResponse{
@@ -1368,20 +1410,12 @@ func (h *handlers) GetAnnouncementList(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	tx, err := h.DB.Beginx()
-	if err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	defer tx.Rollback()
-
 	var announcements []AnnouncementWithoutDetail
 	var args []interface{}
-	query := "SELECT `announcements`.`id`, `courses`.`id` AS `course_id`, `courses`.`name` AS `course_name`, `announcements`.`title`, NOT `unread_announcements`.`is_deleted` AS `unread`" +
+	query := "SELECT `announcements`.`id`, `courses`.`id` AS `course_id`, `courses`.`name` AS `course_name`, `announcements`.`title`" +
 		" FROM `announcements`" +
 		" JOIN `courses` ON `announcements`.`course_id` = `courses`.`id`" +
 		" JOIN `registrations` ON `courses`.`id` = `registrations`.`course_id`" +
-		" JOIN `unread_announcements` ON `announcements`.`id` = `unread_announcements`.`announcement_id`" +
 		" WHERE 1=1"
 
 	if courseID := c.QueryParam("course_id"); courseID != "" {
@@ -1389,11 +1423,10 @@ func (h *handlers) GetAnnouncementList(c echo.Context) error {
 		args = append(args, courseID)
 	}
 
-	query += " AND `unread_announcements`.`user_id` = ?" +
-		" AND `registrations`.`user_id` = ?" +
+	query += " AND `registrations`.`user_id` = ?" +
 		" ORDER BY `announcements`.`id` DESC" +
 		" LIMIT ? OFFSET ?"
-	args = append(args, userID, userID)
+	args = append(args, userID)
 
 	var page int
 	if c.QueryParam("page") == "" {
@@ -1409,18 +1442,7 @@ func (h *handlers) GetAnnouncementList(c echo.Context) error {
 	// limitより多く上限を設定し、実際にlimitより多くレコードが取得できた場合は次のページが存在する
 	args = append(args, limit+1, offset)
 
-	if err := tx.Select(&announcements, query, args...); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-
-	var unreadCount int
-	if err := tx.Get(&unreadCount, "SELECT COUNT(*) FROM `unread_announcements` WHERE `user_id` = ? AND NOT `is_deleted`", userID); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-
-	if err := tx.Commit(); err != nil {
+	if err := h.DB.Select(&announcements, query, args...); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
@@ -1449,6 +1471,19 @@ func (h *handlers) GetAnnouncementList(c echo.Context) error {
 
 	if len(announcements) == limit+1 {
 		announcements = announcements[:len(announcements)-1]
+	}
+	ctx := c.Request().Context()
+	unreadCount := 0
+	unreadMap := map[string]bool{}
+	for _, v := range rdb0.SMembers(ctx, userID).Val() {
+		unreadCount += 1
+		unreadMap[v] = true
+	}
+	for i, _ := range announcements {
+		// 通常は未読ではない
+		// redisにあったら未読
+		_, unread := unreadMap[announcements[i].ID]
+		announcements[i].Unread = unread
 	}
 
 	// 対象になっているお知らせが0件の時は空配列を返却
@@ -1523,14 +1558,13 @@ func (h *handlers) AddAnnouncement(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-
+	ctx := c.Request().Context()
+	pipe := rdb0.Pipeline()
+	defer pipe.Close()
 	for _, user := range targets {
-		// TODO: N+1 (gnu)
-		if _, err := tx.Exec("INSERT INTO `unread_announcements` (`announcement_id`, `user_id`) VALUES (?, ?)", req.ID, user.ID); err != nil {
-			c.Logger().Error(err)
-			return c.NoContent(http.StatusInternalServerError)
-		}
+		pipe.SAdd(ctx, user.ID, req.ID)
 	}
+	pipe.Exec(ctx)
 
 	if err := tx.Commit(); err != nil {
 		c.Logger().Error(err)
@@ -1562,24 +1596,19 @@ func (h *handlers) GetAnnouncementDetail(c echo.Context) error {
 	// is_deletedにするだけなのでトランザクションは不要
 	// unread_announcements はinsertのみ
 	var announcement AnnouncementDetail
-	query := "SELECT `announcements`.`id`, `courses`.`id` AS `course_id`, `courses`.`name` AS `course_name`, `announcements`.`title`, `announcements`.`message`, NOT `unread_announcements`.`is_deleted` AS `unread`" +
+	query := "SELECT `announcements`.`id`, `courses`.`id` AS `course_id`, `courses`.`name` AS `course_name`, `announcements`.`title`, `announcements`.`message`" +
 		" FROM `announcements`" +
 		" JOIN `courses` ON `courses`.`id` = `announcements`.`course_id`" +
-		" JOIN `unread_announcements` ON `unread_announcements`.`announcement_id` = `announcements`.`id`" +
 		" JOIN `registrations` AS `r` ON `r`.`course_id` = `courses`.`id` AND `r`.`user_id` = ?" +
-		" WHERE `announcements`.`id` = ?" +
-		" AND `unread_announcements`.`user_id` = ?"
-	if err := h.DB.Get(&announcement, query, userID, announcementID, userID); err != nil && err != sql.ErrNoRows {
+		" WHERE `announcements`.`id` = ?"
+	if err := h.DB.Get(&announcement, query, userID, announcementID); err != nil && err != sql.ErrNoRows {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	} else if err == sql.ErrNoRows {
 		return c.String(http.StatusNotFound, "No such announcement.")
 	}
-
-	if _, err := h.DB.Exec("UPDATE `unread_announcements` SET `is_deleted` = true WHERE `announcement_id` = ? AND `user_id` = ?", announcementID, userID); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-
+	ctx := c.Request().Context()
+	deleteSuccess := rdb0.SRem(ctx, userID, announcementID).Val() > 0
+	announcement.Unread = deleteSuccess
 	return c.JSON(http.StatusOK, announcement)
 }
