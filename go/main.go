@@ -1399,7 +1399,7 @@ func (h *handlers) RegisterScores(c echo.Context) error {
 			userCodes = strings.Join([]string{userCodes, fmt.Sprintf(", \"%s\"", score.UserCode)}, " ")
 		}
 	}
-	if _, err := tx.Exec(fmt.Sprintf("update `submissions` set `score` = ELT(FIELD(`user_code`, %s), %s) WHERE `user_code` IN (%s) AND `class_id` = ?", userCodes, scores, userCodes), classID); err != nil {
+	if _, err := h.DB.Exec(fmt.Sprintf("update `submissions` set `score` = ELT(FIELD(`user_code`, %s), %s) WHERE `user_code` IN (%s) AND `class_id` = ?", userCodes, scores, userCodes), classID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
