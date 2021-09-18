@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -73,7 +74,7 @@ var sessionCache = sync.Map{}
 func main() {
 	go func() { log.Println(http.ListenAndServe(":9009", nil)) }()
 	e := echo.New()
-	e.Debug = GetEnv("DEBUG", "") == "true"
+	e.Debug = true
 	e.Server.Addr = fmt.Sprintf(":%v", GetEnv("PORT", "7000"))
 	e.HideBanner = true
 
@@ -677,6 +678,7 @@ type classIdNameCode struct {
 
 type CourseResultWithMyTotalScore struct {
 	classScores []ClassScore
+	Course Course
 	myTotalScore int
 }
 
@@ -693,24 +695,23 @@ func (h *handlers) GetGrades(c echo.Context) error {
 	query := "SELECT `classes`.`id` AS `classes.id`,`classes`.`course_id` AS `classes.course_id`, `classes`.`part` AS `classes.part`, `classes`.`title` AS `classes.title`, `classes`.`description` AS `classes.description`, `classes`.`submission_closed` AS `classes.submission_closed`, `courses`.`id` AS `courses.id`, `courses`.`code` AS `courses.code`, `courses`.`type` AS `courses.type`, `courses`.`name` AS `courses.name`, `courses`.`description` AS `courses.description`, `courses`.`credit` AS `courses.credit`, `courses`.`period` AS `courses.period`, `courses`.`day_of_week` AS `courses.day_of_week`, `courses`.`teacher_id` AS `courses.teacher_id`, `courses`.`keywords` AS `courses.keywords`, `courses`.`status` AS `courses.status`" +
 		" FROM `registrations`" +
 		" JOIN `courses` ON `registrations`.`course_id` = `courses`.`id`" +
-		" RIGHT JOIN `classes` ON `classes`.`course_id` = `courses`.`id`" +
-		" WHERE `user_id` = ? ORDER BY `classes`.`part` DESC"
+		" JOIN `classes` ON `classes`.`course_id` = `courses`.`id`" +
+		" WHERE `registrations`.`user_id` = ? ORDER BY `classes`.`part` DESC"
 	if err := h.DB.Select(&registeredClasses, query, userID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
 	// 科目毎の成績計算処理
-	courseResults := make([]CourseResult, 0, len(registeredClasses))
 	myGPA := 0.0
 	myCredits := 0
-	classDict := make(map[classIdNameCode]CourseResultWithMyTotalScore)
+	courseDict := make(map[string]CourseResultWithMyTotalScore)
+	t1 := time.Now()
 	for _, classWithCourse := range registeredClasses {
-		cinc := classIdNameCode{classWithCourse.Course.ID, classWithCourse.Course.Name, classWithCourse.Course.Code, classWithCourse.Course.Status, classWithCourse.Course.Credit}
 		// 講義毎の成績計算処理
-		classScores, ok := classDict[cinc]
+		classScores, ok := courseDict[classWithCourse.Course.ID]
 		if !ok {
-			classScores = CourseResultWithMyTotalScore{make([]ClassScore, 0), 0}
+			classScores = CourseResultWithMyTotalScore{make([]ClassScore, 0), Course{}, 0}
 		}
 		var submissionsCount int
 		// TODO: N+1 (gnu)
@@ -743,9 +744,12 @@ func (h *handlers) GetGrades(c echo.Context) error {
 				Submitters: submissionsCount,
 			})
 		}
-		classDict[cinc] = classScores
+		classScores.Course = classWithCourse.Course
+		courseDict[classWithCourse.Course.ID] = classScores
 	}
-	for cinc, res := range classDict {
+	t2 := time.Now()
+	courseResults := make([]CourseResult, 0, len(registeredClasses))
+	for _, res := range courseDict {
 		// この科目を履修している学生のTotalScore一覧を取得
 		var totals []int
 		query := "SELECT IFNULL(SUM(`submissions`.`score`), 0) AS `total_score`" +
@@ -756,13 +760,13 @@ func (h *handlers) GetGrades(c echo.Context) error {
 			" LEFT JOIN `submissions` ON `users`.`id` = `submissions`.`user_id` AND `submissions`.`class_id` = `classes`.`id`" +
 			" WHERE `courses`.`id` = ?" +
 			" GROUP BY `users`.`id`"
-		if err := h.DB.Select(&totals, query, cinc.ID); err != nil {
+		if err := h.DB.Select(&totals, query, res.Course.ID); err != nil {
 			c.Logger().Error(err)
 			return c.NoContent(http.StatusInternalServerError)
 		}
 		courseResults = append(courseResults, CourseResult{
-			Name:             cinc.Name,
-			Code:             cinc.Code,
+			Name:             res.Course.Name,
+			Code:             res.Course.Code,
 			TotalScore:       res.myTotalScore,
 			TotalScoreTScore: tScoreInt(res.myTotalScore, totals),
 			TotalScoreAvg:    averageInt(totals, 0),
@@ -772,11 +776,12 @@ func (h *handlers) GetGrades(c echo.Context) error {
 		})
 
 		// 自分のGPA計算
-		if cinc.Status == StatusClosed {
-			myGPA += float64(res.myTotalScore * int(cinc.Credit))
-			myCredits += int(cinc.Credit)
+		if res.Course.Status == StatusClosed {
+			myGPA += float64(res.myTotalScore * int(res.Course.Credit))
+			myCredits += int(res.Course.Credit)
 		}
 	}
+	t3 := time.Now()
 	if myCredits > 0 {
 		myGPA = myGPA / 100 / float64(myCredits)
 	}
@@ -803,6 +808,7 @@ func (h *handlers) GetGrades(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	t4 := time.Now()
 
 	res := GetGradeResponse{
 		Summary: Summary{
@@ -815,6 +821,7 @@ func (h *handlers) GetGrades(c echo.Context) error {
 		},
 		CourseResults: courseResults,
 	}
+	c.Logger().Info(fmt.Sprintf("[GRADE] b1:%d\tb2:%d\tb3:%d", t2.Sub(t1) / time.Millisecond, t3.Sub(t2) / time.Millisecond, t4.Sub(t3) / time.Millisecond))
 
 	return c.JSON(http.StatusOK, res)
 }
