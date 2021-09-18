@@ -5,15 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/go-redis/redis/v8"
-	"github.com/go-sql-driver/mysql"
-	"github.com/gorilla/sessions"
-	"github.com/jmoiron/sqlx"
-	"github.com/labstack/echo-contrib/session"
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
-	"github.com/shamaton/msgpack"
-	"golang.org/x/crypto/bcrypt"
 	"io"
 	"log"
 	"net/http"
@@ -25,6 +16,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/go-redis/redis/v8"
+	"github.com/go-sql-driver/mysql"
+	"github.com/gorilla/sessions"
+	"github.com/jmoiron/sqlx"
+	"github.com/labstack/echo-contrib/session"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+	"github.com/shamaton/msgpack"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -66,6 +67,12 @@ func DecodePtrSliceCmdElem(partsOfSliceCmd interface{}, valuePtr interface{}) {
 var rdb0 = redis.NewClient(&redis.Options{
 	Addr: "10.11.7.103:6379",
 	DB:   0, // 0 - 15
+})
+
+// key: courseID value, status
+var rdb1 = redis.NewClient(&redis.Options{
+	Addr: "10.11.7.103:6379",
+	DB:   1, // 0 - 15
 })
 
 var sessionCache = sync.Map{}
@@ -174,6 +181,9 @@ func (h *handlers) Initialize(c echo.Context) error {
 		pipe.Exec(ctx)
 	}
 
+	{
+		rdb1.FlushDB(ctx)
+	}
 	// アプリ複数台のときは初期化されないことがないか気をつけること
 	sessionCache = sync.Map{}
 	res := InitializeResponse{
@@ -975,6 +985,8 @@ func (h *handlers) AddCourse(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
+	rdb1.Set(c.Request().Context(), courseID, StatusRegistration, 0).Result()
+
 	return c.JSON(http.StatusCreated, AddCourseResponse{ID: courseID})
 }
 
@@ -1036,6 +1048,9 @@ func (h *handlers) SetCourseStatus(c echo.Context) error {
 
 	if _, err := h.DB.Exec("UPDATE `courses` SET `status` = ? WHERE `id` = ?", req.Status, courseID); err != nil {
 		c.Logger().Error(err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	if _, err := rdb1.Set(c.Request().Context(), courseID, req.Status, 0).Result(); err != nil {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	return c.NoContent(http.StatusOK)
@@ -1206,17 +1221,28 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
-	var status CourseStatus
-	if err := tx.Get(&status, "SELECT `status` FROM `courses` WHERE `id` = ? FOR SHARE", courseID); err != nil && err != sql.ErrNoRows {
-		c.Logger().Error(err)
+	status, err := rdb1.Get(c.Request().Context(), courseID).Result()
+	if err != nil {
+		if err == redis.Nil {
+			var status CourseStatus
+			if err := tx.Get(&status, "SELECT `status` FROM `courses` WHERE `id` = ? FOR SHARE", courseID); err != nil && err != sql.ErrNoRows {
+				c.Logger().Error(err)
+				return c.NoContent(http.StatusInternalServerError)
+			} else if err == sql.ErrNoRows {
+				return c.String(http.StatusNotFound, "No such course.")
+			}
+			if status != StatusInProgress {
+				return c.String(http.StatusBadRequest, "This course is not in progress.")
+			}
+		}
 		return c.NoContent(http.StatusInternalServerError)
-	} else if err == sql.ErrNoRows {
-		return c.String(http.StatusNotFound, "No such course.")
-	}
-	if status != StatusInProgress {
-		return c.String(http.StatusBadRequest, "This course is not in progress.")
+	} else {
+		if status != string(StatusInProgress) {
+			return c.String(http.StatusBadRequest, "This course is not in progress.")
+		}
 	}
 
+	// 科目を履修してるか
 	var registrationCount int
 	if err := tx.Get(&registrationCount, "SELECT COUNT(*) FROM `registrations` WHERE `user_id` = ? AND `course_id` = ?", userID, courseID); err != nil {
 		c.Logger().Error(err)
@@ -1226,6 +1252,7 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "You have not taken this course.")
 	}
 
+	// 提出期限過ぎてないか
 	var submissionClosed bool
 	if err := tx.Get(&submissionClosed, "SELECT `submission_closed` FROM `classes` WHERE `id` = ? FOR SHARE", classID); err != nil && err != sql.ErrNoRows {
 		c.Logger().Error(err)
