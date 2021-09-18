@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -1322,12 +1323,46 @@ func (h *handlers) DownloadSubmittedAssignments(c echo.Context) error {
 	return c.File(zipFilePath)
 }
 
-func createSubmissionsZip(zipFilePath string, classID string, submissions []Submission) error {
-	tmpDir := AssignmentsDirectory + classID + "/"
-	if err := exec.Command("rm", "-rf", tmpDir).Run(); err != nil {
+func zipzipzip(zipFilePath string, tmpDir string) error {
+	archive, err := os.Create(zipFilePath)
+	if err != nil {
 		return err
 	}
-	if err := exec.Command("mkdir", tmpDir).Run(); err != nil {
+	defer archive.Close()
+	zipWriter := zip.NewWriter(archive)
+	files, err := os.ReadDir(tmpDir)
+	if err != nil {
+		return err
+	}
+	for _, v := range files {
+		if v.IsDir() {
+			continue
+		}
+		f, err := os.Open(v.Name())
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		w, err := zipWriter.Create(v.Name())
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(w, f); err != nil {
+			return err
+		}
+		zipWriter.Close()
+	}
+
+	fmt.Println("closing zip archive...")
+	return zipWriter.Close()
+}
+
+func createSubmissionsZip(zipFilePath string, classID string, submissions []Submission) error {
+	tmpDir := AssignmentsDirectory + classID + "/"
+	if err := os.RemoveAll(tmpDir); err != nil {
+		return err
+	}
+	if err := os.Mkdir(tmpDir, 0755); err != nil {
 		return err
 	}
 
@@ -1343,7 +1378,8 @@ func createSubmissionsZip(zipFilePath string, classID string, submissions []Subm
 	}
 
 	// -i 'tmpDir/*': 空zipを許す
-	return exec.Command("zip", "-j", "-r", zipFilePath, tmpDir, "-i", tmpDir+"*").Run()
+	return zipzipzip(zipFilePath, tmpDir)
+	// return exec.Command("zip", "-j", "-r", zipFilePath, tmpDir, "-i", tmpDir+"*").Run()
 }
 
 // ---------- Announcement API ----------
