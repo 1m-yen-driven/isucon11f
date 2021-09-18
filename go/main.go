@@ -4,6 +4,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/go-sql-driver/mysql"
+	"github.com/gorilla/sessions"
+	"github.com/jmoiron/sqlx"
+	"github.com/labstack/echo-contrib/session"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+	"golang.org/x/crypto/bcrypt"
 	"io"
 	"log"
 	"net/http"
@@ -14,14 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/go-sql-driver/mysql"
-	"github.com/gorilla/sessions"
-	"github.com/jmoiron/sqlx"
-	"github.com/labstack/echo-contrib/session"
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
-	"golang.org/x/crypto/bcrypt"
+	"sync"
 )
 
 const (
@@ -35,6 +35,8 @@ const (
 type handlers struct {
 	DB *sqlx.DB
 }
+
+var sessionCache = sync.Map{}
 
 func main() {
 	go func() { log.Println(http.ListenAndServe(":9009", nil)) }()
@@ -123,7 +125,8 @@ func (h *handlers) Initialize(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-
+	// アプリ複数台のときは初期化されないことがないか気をつけること
+	sessionCache = sync.Map{}
 	res := InitializeResponse{
 		Language: "go",
 	}
@@ -133,20 +136,29 @@ func (h *handlers) Initialize(c echo.Context) error {
 // IsLoggedIn ログイン確認用middleware
 func (h *handlers) IsLoggedIn(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		sess, err := session.Get(SessionName, c)
+		r := c.Request()
+		cookie, err := r.Cookie(SessionName)
 		if err != nil {
-			c.Logger().Error(err)
-			return c.NoContent(http.StatusInternalServerError)
-		}
-		if sess.IsNew {
 			return c.String(http.StatusUnauthorized, "You are not logged in.")
 		}
-		_, ok := sess.Values["userID"]
-		if !ok {
-			return c.String(http.StatusUnauthorized, "You are not logged in.")
+		if _, ok := sessionCache.Load(cookie.Value); ok {
+			return next(c)
+		} else {
+			sess, err := session.Get(SessionName, c)
+			if err != nil {
+				c.Logger().Error(err)
+				return c.NoContent(http.StatusInternalServerError)
+			}
+			if sess.IsNew {
+				return c.String(http.StatusUnauthorized, "You are not logged in.")
+			}
+			userID, ok := sess.Values["userID"]
+			if !ok {
+				return c.String(http.StatusUnauthorized, "You are not logged in.")
+			}
+			sessionCache.Store(cookie.Value, userID)
+			return next(c)
 		}
-
-		return next(c)
 	}
 }
 
