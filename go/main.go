@@ -71,6 +71,18 @@ var rdb0 = redis.NewClient(&redis.Options{
 	DB:   0, // 0 - 15
 })
 
+// key: courseID value, status
+var rdb1 = redis.NewClient(&redis.Options{
+	Addr: "10.11.7.103:6379",
+	DB:   1, // 0 - 15
+})
+
+// key: classID value, status
+var rdb2 = redis.NewClient(&redis.Options{
+	Addr: "10.11.7.103:6379",
+	DB:   2, // 0 - 15
+})
+
 var sessionCache = sync.Map{}
 
 func main() {
@@ -177,6 +189,12 @@ func (h *handlers) Initialize(c echo.Context) error {
 		pipe.Exec(ctx)
 	}
 
+	{
+		rdb1.FlushDB(ctx)
+	}
+	{
+		rdb2.FlushDB(ctx)
+	}
 	// アプリ複数台のときは初期化されないことがないか気をつけること
 	sessionCache = sync.Map{}
 	res := InitializeResponse{
@@ -1004,6 +1022,8 @@ func (h *handlers) AddCourse(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
+	rdb1.Set(c.Request().Context(), courseID, StatusRegistration, 0).Result()
+
 	return c.JSON(http.StatusCreated, AddCourseResponse{ID: courseID})
 }
 
@@ -1064,6 +1084,10 @@ func (h *handlers) SetCourseStatus(c echo.Context) error {
 	}
 
 	if _, err := h.DB.Exec("UPDATE `courses` SET `status` = ? WHERE `id` = ?", req.Status, courseID); err != nil {
+		c.Logger().Error(err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	if _, err := rdb1.Set(c.Request().Context(), courseID, string(req.Status), 0).Result(); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
@@ -1235,17 +1259,32 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
-	var status CourseStatus
-	if err := tx.Get(&status, "SELECT `status` FROM `courses` WHERE `id` = ? FOR SHARE", courseID); err != nil && err != sql.ErrNoRows {
-		c.Logger().Error(err)
+	status, err := rdb1.Get(c.Request().Context(), courseID).Result()
+	if err != nil {
+		if err == redis.Nil {
+			var status CourseStatus
+			if err := tx.Get(&status, "SELECT `status` FROM `courses` WHERE `id` = ? FOR SHARE", courseID); err != nil && err != sql.ErrNoRows {
+				c.Logger().Error(err)
+				return c.NoContent(http.StatusInternalServerError)
+			} else if err == sql.ErrNoRows {
+				return c.String(http.StatusNotFound, "No such course.")
+			}
+			_, err = rdb1.Set(c.Request().Context(), courseID, StatusInProgress, 0).Result()
+			if status != StatusInProgress {
+				return c.String(http.StatusBadRequest, "This course is not in progress.")
+			}
+			if err != nil {
+				c.Logger().Error(err)
+			}
+		}
 		return c.NoContent(http.StatusInternalServerError)
-	} else if err == sql.ErrNoRows {
-		return c.String(http.StatusNotFound, "No such course.")
-	}
-	if status != StatusInProgress {
-		return c.String(http.StatusBadRequest, "This course is not in progress.")
+	} else {
+		if status != string(StatusInProgress) {
+			return c.String(http.StatusBadRequest, "This course is not in progress.")
+		}
 	}
 
+	// 科目を履修してるか
 	var registrationCount int
 	if err := tx.Get(&registrationCount, "SELECT COUNT(*) FROM `registrations` WHERE `user_id` = ? AND `course_id` = ?", userID, courseID); err != nil {
 		c.Logger().Error(err)
@@ -1255,15 +1294,29 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "You have not taken this course.")
 	}
 
-	var submissionClosed bool
-	if err := tx.Get(&submissionClosed, "SELECT `submission_closed` FROM `classes` WHERE `id` = ? FOR SHARE", classID); err != nil && err != sql.ErrNoRows {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	} else if err == sql.ErrNoRows {
-		return c.String(http.StatusNotFound, "No such class.")
-	}
-	if submissionClosed {
-		return c.String(http.StatusBadRequest, "Submission has been closed for this class.")
+	submissionClosedString, err := rdb2.Get(c.Request().Context(), classID).Result()
+	if err != nil {
+		if err == redis.Nil {
+			var submissionClosed bool
+			if err := tx.Get(&submissionClosed, "SELECT `submission_closed` FROM `classes` WHERE `id` = ? FOR SHARE", classID); err != nil && err != sql.ErrNoRows {
+				c.Logger().Error(err)
+				return c.NoContent(http.StatusInternalServerError)
+			} else if err == sql.ErrNoRows {
+				return c.String(http.StatusNotFound, "No such class.")
+			}
+			_, err = rdb2.Set(c.Request().Context(), classID, strconv.FormatBool(submissionClosed), 0).Result()
+			if err != nil {
+				c.Logger().Error(err)
+				return c.NoContent(http.StatusInternalServerError)
+			}
+			if submissionClosed {
+				return c.String(http.StatusBadRequest, "Submission has been closed for this class.")
+			}
+		}
+	} else {
+		if submissionClosedString == "true" {
+			return c.String(http.StatusBadRequest, "Submission has been closed for this class.")
+		}
 	}
 
 	file, header, err := c.Request().FormFile("file")
@@ -1284,6 +1337,11 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
+	if err := tx.Commit(); err != nil {
+		c.Logger().Error(err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
 	go func() {
 		dst := AssignmentsDirectory + classID + "-" + userID + ".pdf"
 		if err := os.WriteFile(dst, data, 0666); err != nil {
@@ -1291,11 +1349,6 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 			// return c.NoContent(http.StatusInternalServerError)
 		}
 	}()
-
-	if err := tx.Commit(); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
 
 	return c.NoContent(http.StatusNoContent)
 }
@@ -1314,15 +1367,8 @@ func (h *handlers) RegisterScores(c echo.Context) error {
 
 	classID := c.Param("classID")
 
-	tx, err := h.DB.Beginx()
-	if err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	defer tx.Rollback()
-
 	var submissionClosed bool
-	if err := tx.Get(&submissionClosed, "SELECT `submission_closed` FROM `classes` WHERE `id` = ? FOR SHARE", classID); err != nil && err != sql.ErrNoRows {
+	if err := h.DB.Get(&submissionClosed, "SELECT `submission_closed` FROM `classes` WHERE `id` = ? FOR SHARE", classID); err != nil && err != sql.ErrNoRows {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	} else if err == sql.ErrNoRows {
@@ -1365,11 +1411,6 @@ func (h *handlers) RegisterScores(c echo.Context) error {
 	// 		return c.NoContent(http.StatusInternalServerError)
 	// 	}
 	// }
-
-	if err := tx.Commit(); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
 
 	return c.NoContent(http.StatusNoContent)
 }
@@ -1414,6 +1455,10 @@ func (h *handlers) DownloadSubmittedAssignments(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	if _, err := rdb2.Set(c.Request().Context(), classID, strconv.FormatBool(true), 0).Result(); err != nil {
+		c.Logger().Error(err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
 
 	return c.File(zipFilePath)
 }
@@ -1427,6 +1472,28 @@ func createSubmissionsZip(zipFilePath string, classID string, submissions []Subm
 	}
 
 	// ファイル名を指定の形式に変更
+	// for _, submission := range submissions {
+	// 	src := AssignmentsDirectory + classID + "-" + submission.UserID + ".pdf"
+	// 	dst := tmpDir + submission.UserCode + "-" + submission.FileName
+	// 	os.Symlink(dst, src)
+	// }
+	// for _, submission := range submissions {
+	// 	// emulate cp
+	// 	srcName := AssignmentsDirectory + classID + "-" + submission.UserID + ".pdf"
+	// 	dstName := tmpDir + submission.UserCode + "-" + submission.FileName
+	// 	src, err := os.Open(srcName)
+	// 	if err != nil {
+	// 		continue
+	// 	}
+	// 	defer src.Close()
+	// 	dst, err := os.Create(dstName)
+	// 	if err != nil {
+	// 		continue
+	// 	}
+	// 	defer dst.Close()
+	// 	io.Copy(dst, src)
+	// }
+	// ファイル名を指定の形式に変更
 	for _, submission := range submissions {
 		if err := exec.Command(
 			"cp",
@@ -1438,7 +1505,10 @@ func createSubmissionsZip(zipFilePath string, classID string, submissions []Subm
 	}
 
 	// -i 'tmpDir/*': 空zipを許す
-	return exec.Command("zip", "-j", "-r", zipFilePath, tmpDir, "-i", tmpDir+"*").Run()
+	// -y : symbolic link
+	// -1 : faster
+	// TODO: no stdout
+	return exec.Command("zip", "-j", "-r", "-q", "-1", zipFilePath, tmpDir, "-i", tmpDir+"*").Run()
 }
 
 // ---------- Announcement API ----------
