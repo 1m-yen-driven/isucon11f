@@ -1,6 +1,7 @@
 -- CREATEと逆順
 DROP TABLE IF EXISTS `unread_announcements`;
 DROP TABLE IF EXISTS `announcements`;
+DROP TABLE IF EXISTS `class_scores`;
 DROP TABLE IF EXISTS `scores`;
 DROP TABLE IF EXISTS `submissions`;
 DROP TABLE IF EXISTS `classes`;
@@ -74,6 +75,14 @@ CREATE TABLE `scores`
     `score` INT UNSIGNED NOT NULL,
     PRIMARY KEY (`user_code`, `course_id`)
 );
+
+CREATE TABLE `class_scores`
+(
+    `course_id` CHAR(26) NOT NULL,
+    `class_id` CHAR(26) NOT NULL,
+    `score` INT UNSIGNED NOT NULL,
+    PRIMARY KEY (`course_id`, `class_id`)
+)
 
 CREATE TABLE `announcements`
 (
