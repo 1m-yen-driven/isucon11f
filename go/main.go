@@ -795,9 +795,9 @@ func (h *handlers) GetGrades(c echo.Context) error {
 		classScoresMap[v.ClassID] = v
 	}
 
-	type MyScore struct{
-		Score sql.NullInt64 `db:"score"`
-		ClassID string `db:"class_id"`
+	type MyScore struct {
+		Score   sql.NullInt64 `db:"score"`
+		ClassID string        `db:"class_id"`
 	}
 	myScores := make([]MyScore, 0)
 	// TODO: N+1 (gnu)
@@ -882,11 +882,16 @@ func (h *handlers) GetGrades(c echo.Context) error {
 		if _, ok := scoresMap[res.Course.ID]; !ok {
 			scoresMap[res.Course.ID] = Scores{}
 		}
+		tScore := float64(50)
+		if totalMap[res.Course.ID].StdDevScore != 0 {
+			tScore = (float64(scoresMap[res.Course.ID].Score)-float64(totalMap[res.Course.ID].AveScore))/float64(totalMap[res.Course.ID].StdDevScore)*10 + 50
+		}
+
 		courseResults = append(courseResults, CourseResult{
 			Name:             res.Course.Name,
 			Code:             res.Course.Code,
 			TotalScore:       scoresMap[res.Course.ID].Score,
-			TotalScoreTScore: (float64(scoresMap[res.Course.ID].Score)-float64(totalMap[res.Course.ID].AveScore))/float64(totalMap[res.Course.ID].StdDevScore)*10 + 50,
+			TotalScoreTScore: tScore,
 			TotalScoreAvg:    float64(totalMap[res.Course.ID].AveScore),
 			TotalScoreMax:    totalMap[res.Course.ID].MaxScore,
 			TotalScoreMin:    totalMap[res.Course.ID].MinScore,
@@ -910,6 +915,9 @@ func (h *handlers) GetGrades(c echo.Context) error {
 	cond.Wait()
 	mu.Unlock()
 	gpas, err := getGPA(h, c)
+	if err != nil {
+		c.Logger().Error(err)
+	}
 	t4 := time.Now()
 
 	res := GetGradeResponse{
@@ -1529,15 +1537,21 @@ func (h *handlers) RegisterScores(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
+	scoresArray := []string{}
 	for _, score := range req {
-		if _, err := h.DB.Exec("insert into `scores` (`user_code`, `course_id`, `score`) values (?, ?, ?) on duplicate key update `score` = `score`+VALUES(`score`)", score.UserCode, classInfo.CourseID, score.Score); err != nil {
-			c.Logger().Error(err)
-			return c.NoContent(http.StatusInternalServerError)
-		}
-		if _, err := h.DB.Exec("insert into `class_scores` (`course_id`, `class_id`, `score`) values (?, ?, ?) on duplicate key update `score` = `score` + VALUES(`score`)", classInfo.CourseID, classID, score.Score); err != nil {
-			c.Logger().Error(err)
-			return c.NoContent(http.StatusInternalServerError)
-		}
+		scoresArray = append(scoresArray, fmt.Sprintf(`("%s", "%s", %d)`, score.UserCode, classInfo.CourseID, score.Score))
+	}
+	if _, err := h.DB.Exec(fmt.Sprintf("insert into `scores` (`user_code`, `course_id`, `score`) values %s on duplicate key update `score` = `score`+VALUES(`score`)", strings.Join(scoresArray, ","))); err != nil {
+		c.Logger().Error(err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	scoresArray = []string{}
+	for _, score := range req {
+		scoresArray = append(scoresArray, fmt.Sprintf(`("%s", "%s", %d)`, classInfo.CourseID, classID, score.Score))
+	}
+	if _, err := h.DB.Exec(fmt.Sprintf("insert into `class_scores` (`course_id`, `class_id`, `score`) values %s on duplicate key update `score` = `score` + VALUES(`score`)", strings.Join(scoresArray, ","))); err != nil {
+		c.Logger().Error(err)
+		return c.NoContent(http.StatusInternalServerError)
 	}
 
 	// for _, score := range req {
