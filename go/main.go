@@ -73,22 +73,28 @@ var rdb0 = redis.NewClient(&redis.Options{
 	DB:   0, // 0 - 15
 })
 
-// key: course-ID / value: status
+// course: key:ID / value:status
 var rdb1 = redis.NewClient(&redis.Options{
 	Addr: "172.31.47.193:6379",
 	DB:   1, // 0 - 15
 })
 
-// key: class-ID / value: submission_closed
+// class: key:ID / value:submission_closed
 var rdb2 = redis.NewClient(&redis.Options{
 	Addr: "172.31.47.193:6379",
 	DB:   2, // 0 - 15
 })
 
-// courseID + "=" + userID -> submitted[]
+// submission: classID -> userID
 var rdb3 = redis.NewClient(&redis.Options{
 	Addr: "172.31.47.193:6379",
 	DB:   3, // 0 - 15
+})
+
+// user: userCode -> userID
+var rdb4 = redis.NewClient(&redis.Options{
+	Addr: "172.31.47.193:6379",
+	DB:   4, // 0 - 15
 })
 
 var sessionCache = sync.Map{}
@@ -186,7 +192,9 @@ func (h *handlers) Initialize(c echo.Context) error {
 	ctx := context.Background()
 	{
 		unreads := []UnreadAnnouncements{}
-		h.DB.Select(&unreads, "SELECT * FROM `unread_announcements`")
+		if err := h.DB.Select(&unreads, "SELECT * FROM `unread_announcements`"); err != nil {
+			return c.NoContent(334)
+		}
 
 		// rdb0
 		rdb0.FlushDB(ctx)
@@ -202,7 +210,10 @@ func (h *handlers) Initialize(c echo.Context) error {
 	}
 	{
 		courses := []Course{}
-		h.DB.Select(&courses, "SELECT * FROM `courses`")
+		if err := h.DB.Select(&courses, "SELECT * FROM `courses`"); err != nil {
+			return c.NoContent(335)
+		}
+
 		// rdb1
 		rdb1.FlushDB(ctx)
 		pipe := rdb1.Pipeline()
@@ -216,36 +227,49 @@ func (h *handlers) Initialize(c echo.Context) error {
 		rdb2.FlushDB(ctx)
 	}
 	{
-		type SubmitWithUser struct {
-			ID               string `db:"id"`
-			CourseID         string `db:"course_id"`
-			UserID           string `db:"user_id"`
-			Part             uint8  `db:"part"`
-			Title            string `db:"title"`
-			Description      string `db:"description"`
-			SubmissionClosed bool   `db:"submission_closed"`
-			Submitted        bool   `db:"submitted"`
+		type Submission struct {
+			UserID  string `db:"user_id"`
+			ClassID string `db:"class_id"`
+			// UserCode string `db:"user_code"`
+			// FileName string `db:"file_name"`
+			// Score sql.NullInt64 `db:"score"`
 		}
-		var submits []SubmitWithUser
-		query := "SELECT `classes`.*, `user_id`" +
-			" FROM `classes`" +
-			" LEFT JOIN `submissions` ON `classes`.`id` = `submissions`.`class_id`" +
-			" ORDER BY `classes`.`part`"
-		if err := h.DB.Select(&submits, query); err != nil {
-			c.Logger().Error(err)
-			return c.NoContent(http.StatusInternalServerError)
+		submits := []Submission{}
+		if err := h.DB.Select(&submits, "SELECT `user_id`, `class_id` from `submissions`"); err != nil {
+			return c.NoContent(336)
 		}
+
 		// rdb3
 		rdb3.FlushDB(ctx)
 		pipe := rdb3.Pipeline()
 		defer pipe.Close()
 		for _, submit := range submits {
-			key := submit.CourseID + "=" + submit.UserID
-			value := EncodePtr(&submit)
-			pipe.RPush(ctx, key, value)
+			score := 0
+			if err := h.DB.Get(&score,
+				"SELECT `score` FROM `submissions` WHERE `user_id` = ? AND `class_id` = ?",
+				submit.UserID, submit.ClassID); err != nil {
+				pipe.HSet(ctx, submit.ClassID, submit.UserID, "")
+			} else {
+				pipe.HSet(ctx, submit.ClassID, submit.UserID, strconv.Itoa(score))
+			}
 		}
 		pipe.Exec(ctx)
 	}
+	{
+		users := []User{}
+		if err := h.DB.Select(&users, "SELECT * FROM `users`"); err != nil {
+			return c.NoContent(337)
+		}
+		// rdb4
+		rdb4.FlushDB(ctx)
+		pipe := rdb4.Pipeline()
+		defer pipe.Close()
+		for _, user := range users {
+			pipe.Set(ctx, user.Code, user.ID, 0)
+		}
+		pipe.Exec(ctx)
+	}
+
 	// アプリ複数台のときは初期化されないことがないか気をつけること
 	sessionCache = sync.Map{}
 	res := InitializeResponse{
@@ -811,38 +835,27 @@ func (h *handlers) GetGrades(c echo.Context) error {
 		if !ok {
 			classScores = CourseResultWithMyTotalScore{make([]ClassScore, 0), Course{}, 0}
 		}
-		var submissionsCount int
 		if classWithCourse.Class.ID != nil {
-			// TODO: N+1 (gnu)
-			if err := h.DB.Get(&submissionsCount, "SELECT COUNT(*) FROM `submissions` WHERE `class_id` = ?", classWithCourse.Class.ID); err != nil {
-				c.Logger().Error(err)
-				return c.NoContent(http.StatusInternalServerError)
+			got, err := rdb3.HGet(c.Request().Context(), *classWithCourse.Class.ID, userID).Result()
+			var scorePtr *int = nil
+			if err == nil {
+				score, err := strconv.Atoi(got)
+				if err == nil {
+					classScores.myTotalScore += score
+					scorePtr = &score
+				}
 			}
-
-			var myScore sql.NullInt64
-			// TODO: N+1 (gnu)
-			if err := h.DB.Get(&myScore, "SELECT `submissions`.`score` FROM `submissions` WHERE `user_id` = ? AND `class_id` = ?", userID, classWithCourse.Class.ID); err != nil && err != sql.ErrNoRows {
-				c.Logger().Error(err)
-				return c.NoContent(http.StatusInternalServerError)
-			} else if err == sql.ErrNoRows || !myScore.Valid {
-				classScores.classScores = append(classScores.classScores, ClassScore{
-					ClassID:    *classWithCourse.Class.ID,
-					Part:       *classWithCourse.Class.Part,
-					Title:      *classWithCourse.Class.Title,
-					Score:      nil,
-					Submitters: submissionsCount,
-				})
-			} else {
-				score := int(myScore.Int64)
-				classScores.myTotalScore += score
-				classScores.classScores = append(classScores.classScores, ClassScore{
-					ClassID:    *classWithCourse.Class.ID,
-					Part:       *classWithCourse.Class.Part,
-					Title:      *classWithCourse.Class.Title,
-					Score:      &score,
-					Submitters: submissionsCount,
-				})
+			submissionsCount, err := rdb3.HLen(c.Request().Context(), *classWithCourse.Class.ID).Result()
+			if err != nil {
+				submissionsCount = 0
 			}
+			classScores.classScores = append(classScores.classScores, ClassScore{
+				ClassID:    *classWithCourse.Class.ID,
+				Part:       *classWithCourse.Class.Part,
+				Title:      *classWithCourse.Class.Title,
+				Score:      scorePtr,
+				Submitters: int(submissionsCount),
+			})
 		}
 		classScores.Course = classWithCourse.Course
 		courseDict[classWithCourse.Course.ID] = classScores
@@ -1211,31 +1224,36 @@ func (h *handlers) GetClasses(c echo.Context) error {
 	if rdb1.Get(c.Request().Context(), courseID).Err() != nil {
 		return c.String(http.StatusNotFound, "No such course.")
 	}
-
-	var classes []ClassWithSubmitted
-	query := "SELECT `classes`.*, `submissions`.`user_id` IS NOT NULL AS `submitted`" +
-		" FROM `classes`" +
-		" LEFT JOIN `submissions` ON `classes`.`id` = `submissions`.`class_id` AND `submissions`.`user_id` = ?" +
-		" WHERE `classes`.`course_id` = ?" +
-		" ORDER BY `classes`.`part`"
-	if err := h.DB.Select(&classes, query, userID, courseID); err != nil {
+	classes := []Class{}
+	if err := h.DB.Select(&classes,
+		"SELECT * FROM `classes` WHERE `classes`.`course_id` = ? ORDER BY `classes`.`part`",
+		courseID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-
+	pipe := rdb3.Pipeline()
+	defer pipe.Close()
+	pScores := []*redis.StringCmd{}
+	for _, class := range classes {
+		pScores = append(pScores, pipe.HGet(c.Request().Context(), *class.ID, userID))
+	}
+	pipe.Exec(c.Request().Context())
 	// 結果が0件の時は空配列を返却
 	res := make([]GetClassResponse, 0, len(classes))
-	for _, class := range classes {
+	for i, class := range classes {
+		submitted := false
+		if pScores[i].Err() == nil && pScores[i].Val() != "" {
+			submitted = true
+		}
 		res = append(res, GetClassResponse{
-			ID:               class.ID,
-			Part:             class.Part,
-			Title:            class.Title,
-			Description:      class.Description,
-			SubmissionClosed: class.SubmissionClosed,
-			Submitted:        class.Submitted,
+			ID:               *class.ID,
+			Part:             *class.Part,
+			Title:            *class.Title,
+			Description:      *class.Description,
+			SubmissionClosed: *class.SubmissionClosed,
+			Submitted:        submitted,
 		})
 	}
-
 	return c.JSON(http.StatusOK, res)
 }
 
@@ -1417,6 +1435,7 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	rdb3.HSet(c.Request().Context(), classID, userID, "")
 
 	go func() {
 		dst := AssignmentsDirectory + classID + "-" + userID + ".pdf"
@@ -1461,33 +1480,37 @@ func (h *handlers) RegisterScores(c echo.Context) error {
 	// 	UPDATE `example` SET
 	// name = ELT(FIELD(id,2,4,5),'Mary','Nancy','Oliver')
 	// WHERE id IN (2,4,5)
-	scores := ""
-	userCodes := ""
-	for i, score := range req {
-		if i == 0 {
-			scores = strings.Join([]string{scores, fmt.Sprintf("%d", score.Score)}, " ")
-		} else {
-			scores = strings.Join([]string{scores, fmt.Sprintf(", %d", score.Score)}, " ")
+	{
+		scores := ""
+		userCodes := ""
+		for i, score := range req {
+			if i == 0 {
+				scores = strings.Join([]string{scores, fmt.Sprintf("%d", score.Score)}, " ")
+			} else {
+				scores = strings.Join([]string{scores, fmt.Sprintf(", %d", score.Score)}, " ")
+			}
+			if i == 0 {
+				userCodes = strings.Join([]string{userCodes, fmt.Sprintf("\"%s\"", score.UserCode)}, " ")
+			} else {
+				userCodes = strings.Join([]string{userCodes, fmt.Sprintf(", \"%s\"", score.UserCode)}, " ")
+			}
 		}
-		if i == 0 {
-			userCodes = strings.Join([]string{userCodes, fmt.Sprintf("\"%s\"", score.UserCode)}, " ")
-		} else {
-			userCodes = strings.Join([]string{userCodes, fmt.Sprintf(", \"%s\"", score.UserCode)}, " ")
+		if _, err := h.DB.Exec(fmt.Sprintf("update `submissions` set `score` = ELT(FIELD(`user_code`, %s), %s) WHERE `user_code` IN (%s) AND `class_id` = ?", userCodes, scores, userCodes), classID); err != nil {
+			c.Logger().Error(err)
+			return c.NoContent(http.StatusInternalServerError)
 		}
 	}
-	if _, err := h.DB.Exec(fmt.Sprintf("update `submissions` set `score` = ELT(FIELD(`user_code`, %s), %s) WHERE `user_code` IN (%s) AND `class_id` = ?", userCodes, scores, userCodes), classID); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
+
+	userCodes := []string{}
+	for _, score := range req {
+		userCodes = append(userCodes, score.UserCode)
 	}
-
-	// for _, score := range req {
-	// 	// TODO: N+1 (gnu)
-	// 	if _, err := tx.Exec("UPDATE `submissions` SET `score` = ? WHERE `user_code` = ? AND `class_id` = ?", score.Score, score.UserCode, classID); err != nil {
-	// 		c.Logger().Error(err)
-	// 		return c.NoContent(http.StatusInternalServerError)
-	// 	}
-	// }
-
+	pipe := rdb3.Pipeline()
+	defer pipe.Close()
+	for i, userId := range rdb4.MGet(c.Request().Context(), userCodes...).Val() {
+		pipe.HSet(c.Request().Context(), classID, userId, strconv.Itoa(req[i].Score))
+	}
+	pipe.Exec(c.Request().Context())
 	return c.NoContent(http.StatusNoContent)
 }
 
