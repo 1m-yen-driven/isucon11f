@@ -73,13 +73,13 @@ var rdb0 = redis.NewClient(&redis.Options{
 
 // key: courseID value, status
 var rdb1 = redis.NewClient(&redis.Options{
-	Addr: "10.11.7.103:6379",
+	Addr: "172.31.47.193:6379",
 	DB:   1, // 0 - 15
 })
 
 // key: classID value, status
 var rdb2 = redis.NewClient(&redis.Options{
-	Addr: "10.11.7.103:6379",
+	Addr: "172.31.47.193:6379",
 	DB:   2, // 0 - 15
 })
 
