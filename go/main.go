@@ -27,6 +27,7 @@ import (
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/shamaton/msgpack"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -87,6 +88,7 @@ var sessionCache = sync.Map{}
 
 func main() {
 	go func() { log.Println(http.ListenAndServe(":9009", nil)) }()
+	go syncGPA()
 	e := echo.New()
 	e.Debug = true
 	e.Server.Addr = fmt.Sprintf(":%v", GetEnv("PORT", "7000"))
@@ -699,19 +701,36 @@ type ClassWithCourse struct {
 }
 
 type classIdNameCode struct {
-	ID string
-	Name string
-	Code string
+	ID     string
+	Name   string
+	Code   string
 	Status CourseStatus
 	Credit uint8
 }
 
 type CourseResultWithMyTotalScore struct {
-	classScores []ClassScore
-	Course Course
+	classScores  []ClassScore
+	Course       Course
 	myTotalScore int
 }
 
+var gpaGroup singleflight.Group
+var mu *sync.Mutex = new(sync.Mutex)
+var cond *sync.Cond = sync.NewCond(mu)
+const gpaSyncInterval = 1 * time.Second
+
+func syncGPA() {
+	tick := time.Tick(gpaSyncInterval)
+	for {
+		select {
+		case <-tick:
+			gpaGroup.Forget("")
+			cond.Broadcast()
+		}
+	}
+}
+
+>>>>>>> a273119aa4b9df40ed1267ccf6a91cafa7e2ea10
 // GetGrades GET /api/users/me/grades 成績取得
 func (h *handlers) GetGrades(c echo.Context) error {
 	userID, _, _, _, err := getUserInfo(c)
@@ -818,8 +837,42 @@ func (h *handlers) GetGrades(c echo.Context) error {
 
 	// GPAの統計値
 	// 一つでも修了した科目がある学生のGPA一覧
+	mu.Lock()
+	cond.Wait()
+	mu.Unlock()
+	gpas, err := getGPA(h, c)
+	t4 := time.Now()
+
+	res := GetGradeResponse{
+		Summary: Summary{
+			Credits:   myCredits,
+			GPA:       myGPA,
+			GpaTScore: tScoreFloat64(myGPA, gpas),
+			GpaAvg:    averageFloat64(gpas, 0),
+			GpaMax:    maxFloat64(gpas, 0),
+			GpaMin:    minFloat64(gpas, 0),
+		},
+		CourseResults: courseResults,
+	}
+	c.Logger().Info(fmt.Sprintf("[GRADE] b1:%d\tb2:%d\tb3:%d", t2.Sub(t1)/time.Millisecond, t3.Sub(t2)/time.Millisecond, t4.Sub(t3)/time.Millisecond))
+
+	return c.JSON(http.StatusOK, res)
+}
+
+func getGPA(h *handlers, c echo.Context) ([]float64, error) {
+	gpas, err, _ := gpaGroup.Do("", func() (interface{}, error) {
+		gpas, err := getGpa(h, c)
+		return gpas, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return gpas.([]float64), nil
+}
+
+func getGpa(h *handlers, c echo.Context) ([]float64, error) {
 	var gpas []float64
-	query = "SELECT IFNULL(SUM(`submissions`.`score` * `courses`.`credit`), 0) / 100 / `credits`.`credits` AS `gpa`" +
+	query := "SELECT IFNULL(SUM(`submissions`.`score` * `courses`.`credit`), 0) / 100 / `credits`.`credits` AS `gpa`" +
 		" FROM `users`" +
 		" JOIN (" +
 		"     SELECT `users`.`id` AS `user_id`, SUM(`courses`.`credit`) AS `credits`" +
@@ -836,24 +889,9 @@ func (h *handlers) GetGrades(c echo.Context) error {
 		" GROUP BY `users`.`id`"
 	if err := h.DB.Select(&gpas, query, StatusClosed, StatusClosed, Student); err != nil {
 		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
+		return nil, fmt.Errorf("hoge %w", err)
 	}
-	t4 := time.Now()
-
-	res := GetGradeResponse{
-		Summary: Summary{
-			Credits:   myCredits,
-			GPA:       myGPA,
-			GpaTScore: tScoreFloat64(myGPA, gpas),
-			GpaAvg:    averageFloat64(gpas, 0),
-			GpaMax:    maxFloat64(gpas, 0),
-			GpaMin:    minFloat64(gpas, 0),
-		},
-		CourseResults: courseResults,
-	}
-	c.Logger().Info(fmt.Sprintf("[GRADE] b1:%d\tb2:%d\tb3:%d", t2.Sub(t1) / time.Millisecond, t3.Sub(t2) / time.Millisecond, t4.Sub(t3) / time.Millisecond))
-
-	return c.JSON(http.StatusOK, res)
+	return gpas, nil
 }
 
 // ---------- Courses API ----------
