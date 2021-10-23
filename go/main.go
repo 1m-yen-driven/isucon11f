@@ -64,7 +64,7 @@ func DecodePtrSliceCmdElem(partsOfSliceCmd interface{}, valuePtr interface{}) {
 }
 
 var rdb0 = redis.NewClient(&redis.Options{
-	Addr: "10.11.7.103:6379",
+	Addr: "172.31.47.193:6379",
 	DB:   0, // 0 - 15
 })
 
