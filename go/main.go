@@ -84,6 +84,12 @@ var rdb2 = redis.NewClient(&redis.Options{
 	DB:   2, // 0 - 15
 })
 
+// key: userID value, set(classID)
+var rdb3 = redis.NewClient(&redis.Options{
+	Addr: "172.31.47.193:6379",
+	DB:   3, // 0 - 15
+})
+
 var sessionCache = sync.Map{}
 
 func main() {
@@ -198,6 +204,18 @@ func (h *handlers) Initialize(c echo.Context) error {
 	{
 		rdb2.FlushDB(ctx)
 	}
+	{
+		rdb3.FlushDB(ctx)
+		for _, class := range []string{"01FF4RXEKS0DG2EG20CWPQ60M3", "01FF4RXEKS0DG2EG20CYAYCCGM", "01FF4RXEKS0DG2EG20D23EQZRY", "01FF4RXEKS0DG2EG20D4APKY18", "01FF4RXEKS0DG2EG20D61YCEM1"} {
+			for _, user := range []string{"01FF4RXEKS0DG2EG20CN2GJB8K", "01FF4RXEKS0DG2EG20CQVX6FV0", "01FF4RXEKS0DG2EG20CTTAPEVH"} {
+				if _, err := rdb3.SAdd(ctx, user, class).Result(); err != nil {
+					c.Logger().Error(err)
+					return c.NoContent(http.StatusInternalServerError)
+				}
+			}
+		}
+	}
+	getClassesGroup = singleflight.Group{}
 	// アプリ複数台のときは初期化されないことがないか気をつけること
 	sessionCache = sync.Map{}
 	res := InitializeResponse{
@@ -1154,6 +1172,28 @@ type GetClassResponse struct {
 	Submitted        bool   `json:"submitted"`
 }
 
+func getClasses(db *sqlx.DB, courseID string) ([]Class, error) {
+	var classes []Class
+	query := "SELECT `classes`.*" +
+		" FROM `classes`" +
+		" WHERE `classes`.`course_id` = ?" +
+		" ORDER BY `classes`.`part`"
+	if err := db.Select(&classes, query, courseID); err != nil {
+		return nil, err
+	}
+	return classes, nil
+}
+
+var getClassesGroup singleflight.Group
+
+func getClassesSingleflight(db *sqlx.DB, courseID string) ([]Class, error) {
+	classes, err, _ := getClassesGroup.Do(courseID, func() (interface{}, error) {
+		classes, err := getClasses(db, courseID)
+		return classes, err
+	})
+	return classes.([]Class), err
+}
+
 // GetClasses GET /api/courses/:courseID/classes 科目に紐づく講義一覧の取得
 func (h *handlers) GetClasses(c echo.Context) error {
 	userID, _, _, _, err := getUserInfo(c)
@@ -1173,13 +1213,8 @@ func (h *handlers) GetClasses(c echo.Context) error {
 		return c.String(http.StatusNotFound, "No such course.")
 	}
 
-	var classes []ClassWithSubmitted
-	query := "SELECT `classes`.*, `submissions`.`user_id` IS NOT NULL AS `submitted`" +
-		" FROM `classes`" +
-		" LEFT JOIN `submissions` ON `classes`.`id` = `submissions`.`class_id` AND `submissions`.`user_id` = ?" +
-		" WHERE `classes`.`course_id` = ?" +
-		" ORDER BY `classes`.`part`"
-	if err := h.DB.Select(&classes, query, userID, courseID); err != nil {
+	classes, err := getClassesSingleflight(h.DB, courseID)
+	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
@@ -1187,13 +1222,18 @@ func (h *handlers) GetClasses(c echo.Context) error {
 	// 結果が0件の時は空配列を返却
 	res := make([]GetClassResponse, 0, len(classes))
 	for _, class := range classes {
+		submitted, err := rdb3.SIsMember(c.Request().Context(), userID, class.ID).Result()
+		if err != nil {
+			c.Logger().Error(err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
 		res = append(res, GetClassResponse{
-			ID:               class.ID,
-			Part:             class.Part,
-			Title:            class.Title,
-			Description:      class.Description,
-			SubmissionClosed: class.SubmissionClosed,
-			Submitted:        class.Submitted,
+			ID:               *class.ID,
+			Part:             *class.Part,
+			Title:            *class.Title,
+			Description:      *class.Description,
+			SubmissionClosed: *class.SubmissionClosed,
+			Submitted:        submitted,
 		})
 	}
 
@@ -1255,6 +1295,7 @@ func (h *handlers) AddClass(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	getClassesGroup.Forget(courseID)
 
 	if err := tx.Commit(); err != nil {
 		c.Logger().Error(err)
@@ -1391,6 +1432,10 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 	}
 
 	if _, err := h.DB.Exec("INSERT INTO `submissions` (`user_id`, `user_code`, `class_id`, `file_name`) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE `file_name` = VALUES(`file_name`)", userID, userCode, classID, formFile.filename); err != nil {
+		c.Logger().Error(err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	if _, err := rdb3.SAdd(c.Request().Context(), userID, classID).Result(); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
