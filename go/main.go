@@ -42,6 +42,18 @@ type handlers struct {
 	DB *sqlx.DB
 }
 
+type Scores struct {
+	UserCode string `db:"user_code"`
+	CourseID string `db:"course_id"`
+	Score    int    `db:"score"`
+}
+
+type ClassScores struct {
+	CourseID string `db:"course_id"`
+	ClassID  string `db:"class_id"`
+	Score    int    `db:"score"`
+}
+
 type UserSession struct {
 	UserID   string
 	UserName string
@@ -164,6 +176,22 @@ func (h *handlers) Initialize(c echo.Context) error {
 		if _, err := dbForInit.Exec(string(data)); err != nil {
 			c.Logger().Error(err)
 			return c.NoContent(http.StatusInternalServerError)
+		}
+	}
+
+	type submissionWithScore struct {
+		UserCode string `db:"user_code"`
+		ClassID  string `db:"class_id"`
+		Score    int    `db:"score"`
+	}
+	subs := []submissionWithScore{}
+	h.DB.Select(&subs, "select user_code, class_id, score from submissions where score is not null")
+	for _, v := range subs {
+		var courseID string
+		h.DB.Get(&courseID, "select course_id from classes where `id` = ?", v.ClassID)
+		h.DB.Exec("insert into `scores` (`user_code`, `course_id`, `score`) values (?, ?, ?) on duplicate key update `score` = `score` + VALUES(`score`)", v.UserCode, courseID, v.Score)
+		if _, err := h.DB.Exec("insert into `class_scores` (`course_id`, `class_id`, `score`) values (?, ?, ?) on duplicate key update `score` = `score` + VALUES(`score`)", courseID, v.ClassID, v.Score); err != nil {
+			c.Logger().Error(err)
 		}
 	}
 
@@ -734,7 +762,7 @@ func syncGPA() {
 
 // GetGrades GET /api/users/me/grades 成績取得
 func (h *handlers) GetGrades(c echo.Context) error {
-	userID, _, _, _, err := getUserInfo(c)
+	userID, _, _, userCode, err := getUserInfo(c)
 	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -757,6 +785,30 @@ func (h *handlers) GetGrades(c echo.Context) error {
 	myCredits := 0
 	courseDict := make(map[string]CourseResultWithMyTotalScore)
 	t1 := time.Now()
+	classScoresArray := []ClassScores{}
+	if err := h.DB.Select(&classScoresArray, "select * from `class_scores`"); err != nil {
+		c.Logger().Error(err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	classScoresMap := make(map[string]ClassScores, len(classScoresArray))
+	for _, v := range classScoresArray {
+		classScoresMap[v.ClassID] = v
+	}
+
+	type MyScore struct{
+		Score sql.NullInt64 `db:"score"`
+		ClassID string `db:"class_id"`
+	}
+	myScores := make([]MyScore, 0)
+	// TODO: N+1 (gnu)
+	if err := h.DB.Select(&myScores, "SELECT `submissions`.`score`, `submissions`.`class_id` FROM `submissions` WHERE `user_id` = ?", userID); err != nil && err != sql.ErrNoRows {
+		c.Logger().Error(err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	myScoresMap := make(map[string]MyScore)
+	for _, v := range myScores {
+		myScoresMap[v.ClassID] = v
+	}
 	for _, classWithCourse := range registeredClasses {
 		// 講義毎の成績計算処理
 		classScores, ok := courseDict[classWithCourse.Course.ID]
@@ -771,12 +823,7 @@ func (h *handlers) GetGrades(c echo.Context) error {
 				return c.NoContent(http.StatusInternalServerError)
 			}
 
-			var myScore sql.NullInt64
-			// TODO: N+1 (gnu)
-			if err := h.DB.Get(&myScore, "SELECT `submissions`.`score` FROM `submissions` WHERE `user_id` = ? AND `class_id` = ?", userID, classWithCourse.Class.ID); err != nil && err != sql.ErrNoRows {
-				c.Logger().Error(err)
-				return c.NoContent(http.StatusInternalServerError)
-			} else if err == sql.ErrNoRows || !myScore.Valid {
+			if myScore := myScoresMap[*classWithCourse.Class.ID]; !myScore.Score.Valid {
 				classScores.classScores = append(classScores.classScores, ClassScore{
 					ClassID:    *classWithCourse.Class.ID,
 					Part:       *classWithCourse.Class.Part,
@@ -785,7 +832,7 @@ func (h *handlers) GetGrades(c echo.Context) error {
 					Submitters: submissionsCount,
 				})
 			} else {
-				score := int(myScore.Int64)
+				score := int(myScoresMap[*classWithCourse.Class.ID].Score.Int64)
 				classScores.myTotalScore += score
 				classScores.classScores = append(classScores.classScores, ClassScore{
 					ClassID:    *classWithCourse.Class.ID,
@@ -801,35 +848,54 @@ func (h *handlers) GetGrades(c echo.Context) error {
 	}
 	t2 := time.Now()
 	courseResults := make([]CourseResult, 0, len(registeredClasses))
+	scores := []Scores{}
+	if err := h.DB.Select(&scores, "select * from `scores` where `user_code` = ? ", userCode); err != nil {
+		c.Logger().Error(err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	scoresMap := make(map[string]Scores)
+	for _, v := range scores {
+		scoresMap[v.CourseID] = v
+	}
+	type courseWithTotalScore struct {
+		CourseID    string  `db:"course_id"`
+		TotalScore  int     `db:"total_score"`
+		AveScore    float64 `db:"ave_score"`
+		MinScore    int     `db:"min_score"`
+		MaxScore    int     `db:"max_score"`
+		StdDevScore float64 `db:"stddev_score"`
+	}
+	totalByCourse := []courseWithTotalScore{}
+	if err := h.DB.Select(&totalByCourse, "select `scores`.`course_id`, sum(`scores`.`score`) as `total_score`, avg(`scores`.`score`) as `ave_score`, min(`scores`.`score`) as `min_score`, max(`scores`.`score`) as `max_score`, STDDEV_POP(`scores`.`score`) as `stddev_score` from `scores` group by `scores`.`course_id`"); err != nil {
+		c.Logger().Error(err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	totalMap := make(map[string]courseWithTotalScore, len(totalByCourse))
+	for _, v := range totalByCourse {
+		totalMap[v.CourseID] = v
+	}
 	for _, res := range courseDict {
 		// この科目を履修している学生のTotalScore一覧を取得
-		var totals []int
-		query := "SELECT IFNULL(SUM(`submissions`.`score`), 0) AS `total_score`" +
-			" FROM `users`" +
-			" JOIN `registrations` ON `users`.`id` = `registrations`.`user_id`" +
-			" JOIN `courses` ON `registrations`.`course_id` = `courses`.`id`" +
-			" LEFT JOIN `classes` ON `courses`.`id` = `classes`.`course_id`" +
-			" LEFT JOIN `submissions` ON `users`.`id` = `submissions`.`user_id` AND `submissions`.`class_id` = `classes`.`id`" +
-			" WHERE `courses`.`id` = ?" +
-			" GROUP BY `users`.`id`"
-		if err := h.DB.Select(&totals, query, res.Course.ID); err != nil {
-			c.Logger().Error(err)
-			return c.NoContent(http.StatusInternalServerError)
+		if _, ok := totalMap[res.Course.ID]; !ok {
+			totalMap[res.Course.ID] = courseWithTotalScore{}
+		}
+		if _, ok := scoresMap[res.Course.ID]; !ok {
+			scoresMap[res.Course.ID] = Scores{}
 		}
 		courseResults = append(courseResults, CourseResult{
 			Name:             res.Course.Name,
 			Code:             res.Course.Code,
-			TotalScore:       res.myTotalScore,
-			TotalScoreTScore: tScoreInt(res.myTotalScore, totals),
-			TotalScoreAvg:    averageInt(totals, 0),
-			TotalScoreMax:    maxInt(totals, 0),
-			TotalScoreMin:    minInt(totals, 0),
+			TotalScore:       scoresMap[res.Course.ID].Score,
+			TotalScoreTScore: (float64(scoresMap[res.Course.ID].Score)-float64(totalMap[res.Course.ID].AveScore))/float64(totalMap[res.Course.ID].StdDevScore)*10 + 50,
+			TotalScoreAvg:    float64(totalMap[res.Course.ID].AveScore),
+			TotalScoreMax:    totalMap[res.Course.ID].MaxScore,
+			TotalScoreMin:    totalMap[res.Course.ID].MinScore,
 			ClassScores:      res.classScores,
 		})
 
 		// 自分のGPA計算
 		if res.Course.Status == StatusClosed {
-			myGPA += float64(res.myTotalScore * int(res.Course.Credit))
+			myGPA += float64(scoresMap[res.Course.ID].Score * int(res.Course.Credit))
 			myCredits += int(res.Course.Credit)
 		}
 	}
@@ -875,22 +941,24 @@ func getGPA(h *handlers, c echo.Context) ([]float64, error) {
 
 func getGpa(h *handlers, c echo.Context) ([]float64, error) {
 	var gpas []float64
-	query := "SELECT IFNULL(SUM(`submissions`.`score` * `courses`.`credit`), 0) / 100 / `credits`.`credits` AS `gpa`" +
-		" FROM `users`" +
-		" JOIN (" +
-		"     SELECT `users`.`id` AS `user_id`, SUM(`courses`.`credit`) AS `credits`" +
-		"     FROM `users`" +
-		"     JOIN `registrations` ON `users`.`id` = `registrations`.`user_id`" +
-		"     JOIN `courses` ON `registrations`.`course_id` = `courses`.`id` AND `courses`.`status` = ?" +
-		"     GROUP BY `users`.`id`" +
-		" ) AS `credits` ON `credits`.`user_id` = `users`.`id`" +
-		" JOIN `registrations` ON `users`.`id` = `registrations`.`user_id`" +
-		" JOIN `courses` ON `registrations`.`course_id` = `courses`.`id` AND `courses`.`status` = ?" +
-		" LEFT JOIN `classes` ON `courses`.`id` = `classes`.`course_id`" +
-		" LEFT JOIN `submissions` ON `users`.`id` = `submissions`.`user_id` AND `submissions`.`class_id` = `classes`.`id`" +
-		" WHERE `users`.`type` = ?" +
-		" GROUP BY `users`.`id`"
-	if err := h.DB.Select(&gpas, query, StatusClosed, StatusClosed, Student); err != nil {
+	query := " with `credits` as (" +
+		"   SELECT `users`.`code` AS `user_code`, SUM(`courses`.`credit`) AS `credits`" +
+		"   FROM `users`" +
+		"   JOIN `registrations` ON `users`.`id` = `registrations`.`user_id`" +
+		"   JOIN `courses` ON `registrations`.`course_id` = `courses`.`id` AND `courses`.`status` = ?" +
+		"   WHERE `users`.`type` = ?" +
+		"   GROUP BY `users`.`code`" +
+		" )" +
+		" ,`scores_sum` as (" +
+		"   select `scores`.`user_code`, sum(`scores`.`score` * `courses`.`credit`) as `score`" +
+		"   from `scores`" +
+		"   inner join `courses` on `scores`.`course_id` = `courses`.`id` and `courses`.`status` = ?" +
+		"   group by `scores`.`user_code`" +
+		" )" +
+		" select IFNULL(`scores_sum`.`score`,0) / `credits`.`credits` /100 as `gpa`" +
+		" from `scores_sum`" +
+		" left join `credits` on `scores_sum`.`user_code` = `credits`.`user_code`;"
+	if err := h.DB.Select(&gpas, query, StatusClosed, Student, StatusClosed); err != nil {
 		c.Logger().Error(err)
 		return nil, fmt.Errorf("hoge %w", err)
 	}
@@ -1419,16 +1487,20 @@ func (h *handlers) RegisterScores(c echo.Context) error {
 	}
 
 	classID := c.Param("classID")
-
-	var submissionClosed bool
-	if err := h.DB.Get(&submissionClosed, "SELECT `submission_closed` FROM `classes` WHERE `id` = ? FOR SHARE", classID); err != nil && err != sql.ErrNoRows {
+	type class struct {
+		SubmissionClosed bool   `db:"submission_closed"`
+		CourseID         string `db:"course_id"`
+	}
+	classInfo := class{}
+	// var submissionClosed bool
+	if err := h.DB.Get(&classInfo, "SELECT `submission_closed`, `course_id` FROM `classes` WHERE `id` = ? FOR SHARE", classID); err != nil && err != sql.ErrNoRows {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	} else if err == sql.ErrNoRows {
 		return c.String(http.StatusNotFound, "No such class.")
 	}
 
-	if !submissionClosed {
+	if !classInfo.SubmissionClosed {
 		return c.String(http.StatusBadRequest, "This assignment is not closed yet.")
 	}
 	// UPDATE example SET `name` = "Eve" WHERE `id` = 1;
@@ -1455,6 +1527,17 @@ func (h *handlers) RegisterScores(c echo.Context) error {
 	if _, err := h.DB.Exec(fmt.Sprintf("update `submissions` set `score` = ELT(FIELD(`user_code`, %s), %s) WHERE `user_code` IN (%s) AND `class_id` = ?", userCodes, scores, userCodes), classID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	for _, score := range req {
+		if _, err := h.DB.Exec("insert into `scores` (`user_code`, `course_id`, `score`) values (?, ?, ?) on duplicate key update `score` = `score`+VALUES(`score`)", score.UserCode, classInfo.CourseID, score.Score); err != nil {
+			c.Logger().Error(err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+		if _, err := h.DB.Exec("insert into `class_scores` (`course_id`, `class_id`, `score`) values (?, ?, ?) on duplicate key update `score` = `score` + VALUES(`score`)", classInfo.CourseID, classID, score.Score); err != nil {
+			c.Logger().Error(err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
 	}
 
 	// for _, score := range req {
