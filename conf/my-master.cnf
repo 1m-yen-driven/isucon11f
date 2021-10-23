@@ -1,0 +1,3 @@
+[mysqld]
+server_id = 1
+sync_binlog = 1

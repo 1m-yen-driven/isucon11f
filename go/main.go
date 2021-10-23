@@ -40,6 +40,7 @@ const (
 
 type handlers struct {
 	DB *sqlx.DB
+	Replica *sqlx.DB
 }
 
 type UserSession struct {
@@ -99,11 +100,15 @@ func main() {
 	e.Use(session.Middleware(sessions.NewCookieStore([]byte("trapnomura"))))
 
 	db, _ := GetDB(false)
+	replica, _ := GetReplica(false)
 	db.SetMaxOpenConns(300)
 	db.SetMaxIdleConns(300)
+	replica.SetMaxOpenConns(300)
+	replica.SetMaxIdleConns(300)
 
 	h := &handlers{
 		DB: db,
+		Replica: replica,
 	}
 
 	e.POST("/initialize", h.Initialize)
@@ -203,6 +208,7 @@ func (h *handlers) Initialize(c echo.Context) error {
 	res := InitializeResponse{
 		Language: "go",
 	}
+	time.Sleep(15 * time.Second)
 	return c.JSON(http.StatusOK, res)
 }
 
@@ -394,7 +400,7 @@ func (h *handlers) Login(c echo.Context) error {
 	}
 
 	var user User
-	if err := h.DB.Get(&user, "SELECT * FROM `users` WHERE `code` = ?", req.Code); err != nil && err != sql.ErrNoRows {
+	if err := h.Replica.Get(&user, "SELECT * FROM `users` WHERE `code` = ?", req.Code); err != nil && err != sql.ErrNoRows {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	} else if err == sql.ErrNoRows {
@@ -756,6 +762,7 @@ func (h *handlers) GetGrades(c echo.Context) error {
 	myGPA := 0.0
 	myCredits := 0
 	courseDict := make(map[string]CourseResultWithMyTotalScore)
+	time.Sleep(2 * time.Second)
 	t1 := time.Now()
 	for _, classWithCourse := range registeredClasses {
 		// 講義毎の成績計算処理
@@ -766,7 +773,7 @@ func (h *handlers) GetGrades(c echo.Context) error {
 		var submissionsCount int
 		if classWithCourse.Class.ID != nil {
 			// TODO: N+1 (gnu)
-			if err := h.DB.Get(&submissionsCount, "SELECT COUNT(*) FROM `submissions` WHERE `class_id` = ?", classWithCourse.Class.ID); err != nil {
+			if err := h.Replica.Get(&submissionsCount, "SELECT COUNT(*) FROM `submissions` WHERE `class_id` = ?", classWithCourse.Class.ID); err != nil {
 				c.Logger().Error(err)
 				return c.NoContent(http.StatusInternalServerError)
 			}
@@ -1116,7 +1123,7 @@ func (h *handlers) SetCourseStatus(c echo.Context) error {
 	}
 	// coursesはinsertのみなのでTransactionは不要
 	var count int
-	if err := h.DB.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ? FOR UPDATE", courseID); err != nil {
+	if err := h.DB.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ?", courseID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
