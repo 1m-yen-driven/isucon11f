@@ -1,6 +1,7 @@
 -- CREATEと逆順
 DROP TABLE IF EXISTS `unread_announcements`;
 DROP TABLE IF EXISTS `announcements`;
+DROP TABLE IF EXISTS `scores`;
 DROP TABLE IF EXISTS `submissions`;
 DROP TABLE IF EXISTS `classes`;
 DROP TABLE IF EXISTS `registrations`;
@@ -64,6 +65,14 @@ CREATE TABLE `submissions`
     PRIMARY KEY (`user_id`, `class_id`),
     CONSTRAINT FK_submissions_user_id FOREIGN KEY (`user_id`) REFERENCES `users` (`id`),
     CONSTRAINT FK_submissions_class_id FOREIGN KEY (`class_id`) REFERENCES `classes` (`id`)
+);
+
+CREATE TABLE `scores`
+(
+    `user_code` CHAR(26) NOT NULL,
+    `course_id` CHAR(26) NOT NULL,
+    `score` TINYINT UNSIGEND NOT NULL,
+    PRIMARY KEY (`user_code`, `course_id`)
 );
 
 CREATE TABLE `announcements`
