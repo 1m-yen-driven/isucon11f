@@ -1122,8 +1122,7 @@ func (h *handlers) SetCourseStatus(c echo.Context) error {
 	}
 	// coursesはinsertのみなのでTransactionは不要
 	var count int
-	time.Sleep(100 * time.Millisecond)
-	if err := h.Replica.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ?", courseID); err != nil {
+	if err := h.DB.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ?", courseID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
@@ -1773,7 +1772,7 @@ func (h *handlers) GetAnnouncementDetail(c echo.Context) error {
 		" JOIN `courses` ON `courses`.`id` = `announcements`.`course_id`" +
 		" JOIN `registrations` AS `r` ON `r`.`course_id` = `courses`.`id` AND `r`.`user_id` = ?" +
 		" WHERE `announcements`.`id` = ?"
-	if err := h.Replica.Get(&announcement, query, userID, announcementID); err != nil && err != sql.ErrNoRows {
+	if err := h.DB.Get(&announcement, query, userID, announcementID); err != nil && err != sql.ErrNoRows {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	} else if err == sql.ErrNoRows {
