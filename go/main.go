@@ -1688,7 +1688,7 @@ func (h *handlers) AddAnnouncement(c echo.Context) error {
 	}
 	// coursesは増えるのみなのでtx不要
 	var count int
-	if err := h.Replica.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ?", req.CourseID); err != nil {
+	if err := h.DB.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ?", req.CourseID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
