@@ -1395,11 +1395,6 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	if err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-
 	go func() {
 		dst := AssignmentsDirectory + classID + "-" + userID + ".pdf"
 		if err := os.WriteFile(dst, formFile.data, 0666); err != nil {
