@@ -5,15 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/go-redis/redis/v8"
-	"github.com/go-sql-driver/mysql"
-	"github.com/gorilla/sessions"
-	"github.com/jmoiron/sqlx"
-	"github.com/labstack/echo-contrib/session"
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
-	"github.com/shamaton/msgpack"
-	"golang.org/x/crypto/bcrypt"
 	"io"
 	"log"
 	"net/http"
@@ -26,6 +17,16 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-redis/redis/v8"
+	"github.com/go-sql-driver/mysql"
+	"github.com/gorilla/sessions"
+	"github.com/jmoiron/sqlx"
+	"github.com/labstack/echo-contrib/session"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+	"github.com/shamaton/msgpack"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -44,6 +45,7 @@ type UserSession struct {
 	UserID   string
 	UserName string
 	IsAdmin  bool
+	UserCode string
 }
 
 type UnreadAnnouncements struct {
@@ -214,8 +216,12 @@ func (h *handlers) IsLoggedIn(next echo.HandlerFunc) echo.HandlerFunc {
 			if !ok {
 				iIsAdmin = false
 			}
+			iUserCode, ok := sess.Values["userCode"]
+			if !ok {
+				iUserCode = ""
+			}
 			user := UserSession{
-				iUserID.(string), iUserName.(string), iIsAdmin.(bool),
+				iUserID.(string), iUserName.(string), iIsAdmin.(bool), iUserCode.(string),
 			}
 			sessionCache.Store(cookie.Value, user)
 			return next(c)
@@ -257,37 +263,42 @@ func (h *handlers) IsAdmin(next echo.HandlerFunc) echo.HandlerFunc {
 	}
 }
 
-func getUserInfo(c echo.Context) (userID string, userName string, isAdmin bool, err error) {
+func getUserInfo(c echo.Context) (userID string, userName string, isAdmin bool, userCode string, err error) {
 	r := c.Request()
 	cookie, err := r.Cookie(SessionName)
 	if err != nil {
-		return "", "", false, errors.New("failed to get userInfo from session")
+		return "", "", false, "", errors.New("failed to get userInfo from session")
 	}
 	if iuser, ok := sessionCache.Load(cookie.Value); ok {
 		val := iuser.(UserSession)
-		return val.UserID, val.UserName, val.IsAdmin, nil
+		return val.UserID, val.UserName, val.IsAdmin, val.UserCode, nil
 	} else {
 		sess, err := session.Get(SessionName, c)
 		if err != nil {
-			return "", "", false, err
+			return "", "", false, "", err
 		}
 		_userID, ok := sess.Values["userID"]
 		if !ok {
-			return "", "", false, errors.New("failed to get userID from session")
+			return "", "", false, "", errors.New("failed to get userID from session")
 		}
 		_userName, ok := sess.Values["userName"]
 		if !ok {
-			return "", "", false, errors.New("failed to get userName from session")
+			return "", "", false, "", errors.New("failed to get userName from session")
 		}
 		_isAdmin, ok := sess.Values["isAdmin"]
 		if !ok {
-			return "", "", false, errors.New("failed to get isAdmin from session")
+			return "", "", false, "", errors.New("failed to get isAdmin from session")
 		}
+		_userCode, ok := sess.Values["userCode"]
+		if !ok {
+			return "", "", false, "", errors.New("failed to get userCode from session")
+		}
+
 		user := UserSession{
-			_userID.(string), _userName.(string), _isAdmin.(bool),
+			_userID.(string), _userName.(string), _isAdmin.(bool), _userCode.(string),
 		}
 		sessionCache.Store(cookie.Value, user)
-		return _userID.(string), _userName.(string), _isAdmin.(bool), nil
+		return _userID.(string), _userName.(string), _isAdmin.(bool), _userCode.(string), nil
 	}
 }
 
@@ -386,6 +397,7 @@ func (h *handlers) Login(c echo.Context) error {
 	sess.Values["userID"] = user.ID
 	sess.Values["userName"] = user.Name
 	sess.Values["isAdmin"] = user.Type == Teacher
+	sess.Values["userCode"] = user.Code
 	sess.Options = &sessions.Options{
 		Path:   "/",
 		MaxAge: 3600,
@@ -398,7 +410,7 @@ func (h *handlers) Login(c echo.Context) error {
 	r := c.Request()
 	cookie, err := r.Cookie(SessionName)
 	if err == nil {
-		user := UserSession{user.ID, user.Name, user.Type == Teacher}
+		user := UserSession{user.ID, user.Name, user.Type == Teacher, user.Code}
 		sessionCache.Store(cookie.Value, user)
 	}
 	return c.NoContent(http.StatusOK)
@@ -435,17 +447,17 @@ type GetMeResponse struct {
 
 // GetMe GET /api/users/me 自身の情報を取得
 func (h *handlers) GetMe(c echo.Context) error {
-	userID, userName, isAdmin, err := getUserInfo(c)
+	_, userName, isAdmin, userCode, err := getUserInfo(c)
 	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	var userCode string
-	if err := h.DB.Get(&userCode, "SELECT `code` FROM `users` WHERE `id` = ?", userID); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
+	// var userCode string
+	// if err := h.DB.Get(&userCode, "SELECT `code` FROM `users` WHERE `id` = ?", userID); err != nil {
+	// 	c.Logger().Error(err)
+	// 	return c.NoContent(http.StatusInternalServerError)
+	// }
 
 	return c.JSON(http.StatusOK, GetMeResponse{
 		Code:    userCode,
@@ -464,7 +476,7 @@ type GetRegisteredCourseResponseContent struct {
 
 // GetRegisteredCourses GET /api/users/me/courses 履修中の科目一覧取得
 func (h *handlers) GetRegisteredCourses(c echo.Context) error {
-	userID, _, _, err := getUserInfo(c)
+	userID, _, _, _, err := getUserInfo(c)
 	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -526,7 +538,7 @@ type RegisterCoursesErrorResponse struct {
 
 // RegisterCourses PUT /api/users/me/courses 履修登録
 func (h *handlers) RegisterCourses(c echo.Context) error {
-	userID, _, _, err := getUserInfo(c)
+	userID, _, _, _, err := getUserInfo(c)
 	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -684,7 +696,7 @@ type CourseResultWithMyTotalScore struct {
 
 // GetGrades GET /api/users/me/grades 成績取得
 func (h *handlers) GetGrades(c echo.Context) error {
-	userID, _, _, err := getUserInfo(c)
+	userID, _, _, _, err := getUserInfo(c)
 	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -955,7 +967,7 @@ type AddCourseResponse struct {
 
 // AddCourse POST /api/courses 新規科目登録
 func (h *handlers) AddCourse(c echo.Context) error {
-	userID, _, _, err := getUserInfo(c)
+	userID, _, _, _, err := getUserInfo(c)
 	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -1079,7 +1091,7 @@ type GetClassResponse struct {
 
 // GetClasses GET /api/courses/:courseID/classes 科目に紐づく講義一覧の取得
 func (h *handlers) GetClasses(c echo.Context) error {
-	userID, _, _, err := getUserInfo(c)
+	userID, _, _, _, err := getUserInfo(c)
 	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -1207,7 +1219,7 @@ func myReadAll(r io.Reader) ([]byte, error) {
 
 // SubmitAssignment POST /api/courses/:courseID/classes/:classID/assignments 課題の提出
 func (h *handlers) SubmitAssignment(c echo.Context) error {
-	userID, _, _, err := getUserInfo(c)
+	userID, _, _, userCode, err := getUserInfo(c)
 	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -1260,7 +1272,7 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 	}
 	defer file.Close()
 
-	if _, err := tx.Exec("INSERT INTO `submissions` (`user_id`, `class_id`, `file_name`) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE `file_name` = VALUES(`file_name`)", userID, classID, header.Filename); err != nil {
+	if _, err := tx.Exec("INSERT INTO `submissions` (`user_id`, `user_code`, `class_id`, `file_name`) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE `file_name` = VALUES(`file_name`)", userID, userCode, classID, header.Filename); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
@@ -1320,14 +1332,39 @@ func (h *handlers) RegisterScores(c echo.Context) error {
 	if !submissionClosed {
 		return c.String(http.StatusBadRequest, "This assignment is not closed yet.")
 	}
-
-	for _, score := range req {
-		// TODO: N+1 (gnu)
-		if _, err := tx.Exec("UPDATE `submissions` JOIN `users` ON `users`.`id` = `submissions`.`user_id` SET `score` = ? WHERE `users`.`code` = ? AND `class_id` = ?", score.Score, score.UserCode, classID); err != nil {
-			c.Logger().Error(err)
-			return c.NoContent(http.StatusInternalServerError)
+	// UPDATE example SET `name` = "Eve" WHERE `id` = 1;
+	// UPDATE example SET `name` = "Frank" WHERE `id` = 2;
+	// UPDATE example SET `name` = "Greg" WHERE `id` = 3;
+	// UPDATE example SET `name` = "Helen" WHERE `id` = 4;
+	// 	UPDATE `example` SET
+	// name = ELT(FIELD(id,2,4,5),'Mary','Nancy','Oliver')
+	// WHERE id IN (2,4,5)
+	scores := ""
+	userCodes := ""
+	for i, score := range req {
+		if i == 0 {
+			scores = strings.Join([]string{scores, fmt.Sprintf("%d", score.Score)}, " ")
+		} else {
+			scores = strings.Join([]string{scores, fmt.Sprintf(", %d", score.Score)}, " ")
+		}
+		if i == 0 {
+			userCodes = strings.Join([]string{userCodes, fmt.Sprintf("\"%s\"", score.UserCode)}, " ")
+		} else {
+			userCodes = strings.Join([]string{userCodes, fmt.Sprintf(", \"%s\"", score.UserCode)}, " ")
 		}
 	}
+	if _, err := tx.Exec(fmt.Sprintf("update `submissions` set `score` = ELT(FIELD(`user_code`, %s), %s) WHERE `user_code` IN (%s) AND `class_id` = ?", userCodes, scores, userCodes), classID); err != nil {
+		c.Logger().Error(err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	// for _, score := range req {
+	// 	// TODO: N+1 (gnu)
+	// 	if _, err := tx.Exec("UPDATE `submissions` SET `score` = ? WHERE `user_code` = ? AND `class_id` = ?", score.Score, score.UserCode, classID); err != nil {
+	// 		c.Logger().Error(err)
+	// 		return c.NoContent(http.StatusInternalServerError)
+	// 	}
+	// }
 
 	if err := tx.Commit(); err != nil {
 		c.Logger().Error(err)
@@ -1421,7 +1458,7 @@ type GetAnnouncementsResponse struct {
 
 // GetAnnouncementList GET /api/announcements お知らせ一覧取得
 func (h *handlers) GetAnnouncementList(c echo.Context) error {
-	userID, _, _, err := getUserInfo(c)
+	userID, _, _, _, err := getUserInfo(c)
 	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -1602,7 +1639,7 @@ type AnnouncementDetail struct {
 
 // GetAnnouncementDetail GET /api/announcements/:announcementID お知らせ詳細取得
 func (h *handlers) GetAnnouncementDetail(c echo.Context) error {
-	userID, _, _, err := getUserInfo(c)
+	userID, _, _, _, err := getUserInfo(c)
 	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
