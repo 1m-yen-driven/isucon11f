@@ -1379,7 +1379,7 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 	if err != nil {
 		if err == redis.Nil {
 			var submissionClosed bool
-			if err := h.DB.Get(&submissionClosed, "SELECT `submission_closed` FROM `classes` WHERE `id` = ? FOR SHARE", classID); err != nil && err != sql.ErrNoRows {
+			if err := h.DB.Get(&submissionClosed, "SELECT `submission_closed` FROM `classes` WHERE `id` = ?", classID); err != nil && err != sql.ErrNoRows {
 				c.Logger().Error(err)
 				return c.NoContent(http.StatusInternalServerError)
 			} else if err == sql.ErrNoRows {
@@ -1414,11 +1414,6 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 	}
 
 	if _, err := h.DB.Exec("INSERT INTO `submissions` (`user_id`, `user_code`, `class_id`, `file_name`) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE `file_name` = VALUES(`file_name`)", userID, userCode, classID, formFile.filename); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-
-	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
