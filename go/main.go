@@ -105,6 +105,7 @@ func main() {
 	h := &handlers{
 		DB: db,
 	}
+	go InsertSubmissionLoop(e.Logger, db)
 
 	e.POST("/initialize", h.Initialize)
 
@@ -1282,6 +1283,39 @@ func myReadAll(r io.Reader) ([]byte, error) {
 	}
 }
 
+type InsertSubmissionRequest struct {
+	UserID   string `db:"user_id"`
+	UserCode string `db:"user_code"`
+	ClassID  string `db:"class_id"`
+	Filename string `db:"file_name"`
+}
+
+const insertSubmissionInterval = 100 * time.Millisecond
+
+var submissionCh = make(chan InsertSubmissionRequest, 10000)
+var submitLock = new(sync.Mutex)
+var submitCond = sync.NewCond(submitLock)
+
+func InsertSubmissionLoop(logger echo.Logger, db *sqlx.DB) {
+	tick := time.Tick(insertSubmissionInterval)
+	reqs := make([]InsertSubmissionRequest, 0, 10000)
+	for {
+		select {
+		case <-tick:
+			if len(reqs) == 0 {
+				continue
+			}
+			if _, err := db.NamedExec("INSERT INTO `submissions` (`user_id`, `user_code`, `class_id`, `file_name`) VALUES (:user_id, :user_code, :class_id, :file_name) ON DUPLICATE KEY UPDATE `file_name` = VALUES(`file_name`)", reqs); err != nil {
+				logger.Error(err)
+			}
+			reqs = reqs[:0]
+			submitCond.Broadcast()
+		case r := <-submissionCh:
+			reqs = append(reqs, r)
+		}
+	}
+}
+
 // SubmitAssignment POST /api/courses/:courseID/classes/:classID/assignments 課題の提出
 func (h *handlers) SubmitAssignment(c echo.Context) error {
 	userID, _, _, userCode, err := getUserInfo(c)
@@ -1390,15 +1424,14 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "Invalid file.")
 	}
 
-	if _, err := h.DB.Exec("INSERT INTO `submissions` (`user_id`, `user_code`, `class_id`, `file_name`) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE `file_name` = VALUES(`file_name`)", userID, userCode, classID, formFile.filename); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
+	submissionCh <- InsertSubmissionRequest{UserID: userID, UserCode: userCode, ClassID: classID, Filename: formFile.filename}
 
-	if err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
+	submitLock.Lock()
+	submitCond.Wait()
+	submitLock.Unlock()
+
+	// chのqueueに溜まっている場合があるのでもう一回待つ
+	time.Sleep(insertSubmissionInterval)
 
 	go func() {
 		dst := AssignmentsDirectory + classID + "-" + userID + ".pdf"
