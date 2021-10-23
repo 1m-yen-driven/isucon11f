@@ -762,7 +762,7 @@ func (h *handlers) GetGrades(c echo.Context) error {
 	myGPA := 0.0
 	myCredits := 0
 	courseDict := make(map[string]CourseResultWithMyTotalScore)
-	time.Sleep(100 * time.Microsecond)
+	time.Sleep(200 * time.Microsecond)
 	t1 := time.Now()
 	for _, classWithCourse := range registeredClasses {
 		// 講義毎の成績計算処理
