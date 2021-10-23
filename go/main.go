@@ -208,7 +208,7 @@ func (h *handlers) Initialize(c echo.Context) error {
 	res := InitializeResponse{
 		Language: "go",
 	}
-	time.Sleep(10 * time.Second)
+	time.Sleep(15 * time.Second)
 	return c.JSON(http.StatusOK, res)
 }
 
