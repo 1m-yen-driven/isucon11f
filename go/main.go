@@ -717,6 +717,7 @@ type CourseResultWithMyTotalScore struct {
 var gpaGroup singleflight.Group
 var mu *sync.Mutex = new(sync.Mutex)
 var cond *sync.Cond = sync.NewCond(mu)
+
 const gpaSyncInterval = 1 * time.Second
 
 func syncGPA() {
@@ -730,7 +731,6 @@ func syncGPA() {
 	}
 }
 
->>>>>>> a273119aa4b9df40ed1267ccf6a91cafa7e2ea10
 // GetGrades GET /api/users/me/grades 成績取得
 func (h *handlers) GetGrades(c echo.Context) error {
 	userID, _, _, _, err := getUserInfo(c)
