@@ -32,7 +32,7 @@ import (
 
 const (
 	SQLDirectory              = "../sql/"
-	AssignmentsDirectory      = "../assignments/"
+	AssignmentsDirectory      = "/home/isucon/webapp/assignments/"
 	InitDataDirectory         = "../data/"
 	SessionName               = "isucholar_go"
 	mysqlErrNumDuplicateEntry = 1062
@@ -1530,34 +1530,10 @@ func createSubmissionsZip(zipFilePath string, classID string, submissions []Subm
 	}
 
 	// ファイル名を指定の形式に変更
-	// for _, submission := range submissions {
-	// 	src := AssignmentsDirectory + classID + "-" + submission.UserID + ".pdf"
-	// 	dst := tmpDir + submission.UserCode + "-" + submission.FileName
-	// 	os.Symlink(dst, src)
-	// }
-	// for _, submission := range submissions {
-	// 	// emulate cp
-	// 	srcName := AssignmentsDirectory + classID + "-" + submission.UserID + ".pdf"
-	// 	dstName := tmpDir + submission.UserCode + "-" + submission.FileName
-	// 	src, err := os.Open(srcName)
-	// 	if err != nil {
-	// 		continue
-	// 	}
-	// 	defer src.Close()
-	// 	dst, err := os.Create(dstName)
-	// 	if err != nil {
-	// 		continue
-	// 	}
-	// 	defer dst.Close()
-	// 	io.Copy(dst, src)
-	// }
-	// ファイル名を指定の形式に変更
 	for _, submission := range submissions {
-		if err := exec.Command(
-			"cp",
-			AssignmentsDirectory+classID+"-"+submission.UserID+".pdf",
-			tmpDir+submission.UserCode+"-"+submission.FileName,
-		).Run(); err != nil {
+		src := AssignmentsDirectory + classID + "-" + submission.UserID + ".pdf"
+		dst := tmpDir + submission.UserCode + "-" + submission.FileName
+		if err := os.Symlink(src, dst); err != nil {
 			return err
 		}
 	}
