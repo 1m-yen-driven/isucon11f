@@ -772,7 +772,7 @@ func (h *handlers) GetGrades(c echo.Context) error {
 		var submissionsCount int
 		if classWithCourse.Class.ID != nil {
 			// TODO: N+1 (gnu)
-			if err := h.DB.Get(&submissionsCount, "SELECT COUNT(*) FROM `submissions` WHERE `class_id` = ?", classWithCourse.Class.ID); err != nil {
+			if err := h.Replica.Get(&submissionsCount, "SELECT COUNT(*) FROM `submissions` WHERE `class_id` = ?", classWithCourse.Class.ID); err != nil {
 				c.Logger().Error(err)
 				return c.NoContent(http.StatusInternalServerError)
 			}
