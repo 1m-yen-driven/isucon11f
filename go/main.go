@@ -1122,7 +1122,7 @@ func (h *handlers) SetCourseStatus(c echo.Context) error {
 	}
 	// coursesはinsertのみなのでTransactionは不要
 	var count int
-	if err := h.Replica.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ? FOR UPDATE", courseID); err != nil {
+	if err := h.Replica.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ?", courseID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
