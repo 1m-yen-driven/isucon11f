@@ -1548,7 +1548,7 @@ func createSubmissionsZip(zipFilePath string, classID string, submissions []Subm
 	// -y : symbolic link
 	// -1 : faster
 	// TODO: no stdout
-	return exec.Command("zip", "-j", "-r", "-q", "-1", zipFilePath, tmpDir, "-i", tmpDir+"*").Run()
+	return exec.Command("zip", "-j", "-r", "-q", "-0", zipFilePath, tmpDir, "-i", tmpDir+"*").Run()
 }
 
 // ---------- Announcement API ----------
