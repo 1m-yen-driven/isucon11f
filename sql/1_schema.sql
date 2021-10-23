@@ -71,7 +71,7 @@ CREATE TABLE `scores`
 (
     `user_code` CHAR(26) NOT NULL,
     `course_id` CHAR(26) NOT NULL,
-    `score` TINYINT UNSIGEND NOT NULL,
+    `score` TINYINT UNSIGNED NOT NULL,
     PRIMARY KEY (`user_code`, `course_id`)
 );
 
