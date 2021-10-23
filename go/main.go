@@ -654,12 +654,12 @@ func (h *handlers) RegisterCourses(c echo.Context) error {
 }
 
 type Class struct {
-	ID               string `db:"id"`
-	CourseID         string `db:"course_id"`
-	Part             uint8  `db:"part"`
-	Title            string `db:"title"`
-	Description      string `db:"description"`
-	SubmissionClosed bool   `db:"submission_closed"`
+	ID               *string `db:"id"`
+	CourseID         *string `db:"course_id"`
+	Part             *uint8  `db:"part"`
+	Title            *string `db:"title"`
+	Description      *string `db:"description"`
+	SubmissionClosed *bool   `db:"submission_closed"`
 }
 
 type GetGradeResponse struct {
@@ -744,7 +744,7 @@ func (h *handlers) GetGrades(c echo.Context) error {
 	query := "SELECT `classes`.`id` AS `classes.id`,`classes`.`course_id` AS `classes.course_id`, `classes`.`part` AS `classes.part`, `classes`.`title` AS `classes.title`, `classes`.`description` AS `classes.description`, `classes`.`submission_closed` AS `classes.submission_closed`, `courses`.`id` AS `courses.id`, `courses`.`code` AS `courses.code`, `courses`.`type` AS `courses.type`, `courses`.`name` AS `courses.name`, `courses`.`description` AS `courses.description`, `courses`.`credit` AS `courses.credit`, `courses`.`period` AS `courses.period`, `courses`.`day_of_week` AS `courses.day_of_week`, `courses`.`teacher_id` AS `courses.teacher_id`, `courses`.`keywords` AS `courses.keywords`, `courses`.`status` AS `courses.status`" +
 		" FROM `registrations`" +
 		" JOIN `courses` ON `registrations`.`course_id` = `courses`.`id`" +
-		" JOIN `classes` ON `classes`.`course_id` = `courses`.`id`" +
+		" LEFT JOIN `classes` ON `classes`.`course_id` = `courses`.`id`" +
 		" WHERE `registrations`.`user_id` = ? ORDER BY `classes`.`part` DESC"
 	if err := h.DB.Select(&registeredClasses, query, userID); err != nil {
 		c.Logger().Error(err)
@@ -763,35 +763,37 @@ func (h *handlers) GetGrades(c echo.Context) error {
 			classScores = CourseResultWithMyTotalScore{make([]ClassScore, 0), Course{}, 0}
 		}
 		var submissionsCount int
-		// TODO: N+1 (gnu)
-		if err := h.DB.Get(&submissionsCount, "SELECT COUNT(*) FROM `submissions` WHERE `class_id` = ?", classWithCourse.Class.ID); err != nil {
-			c.Logger().Error(err)
-			return c.NoContent(http.StatusInternalServerError)
-		}
+		if classWithCourse.Class.ID != nil {
+			// TODO: N+1 (gnu)
+			if err := h.DB.Get(&submissionsCount, "SELECT COUNT(*) FROM `submissions` WHERE `class_id` = ?", classWithCourse.Class.ID); err != nil {
+				c.Logger().Error(err)
+				return c.NoContent(http.StatusInternalServerError)
+			}
 
-		var myScore sql.NullInt64
-		// TODO: N+1 (gnu)
-		if err := h.DB.Get(&myScore, "SELECT `submissions`.`score` FROM `submissions` WHERE `user_id` = ? AND `class_id` = ?", userID, classWithCourse.Class.ID); err != nil && err != sql.ErrNoRows {
-			c.Logger().Error(err)
-			return c.NoContent(http.StatusInternalServerError)
-		} else if err == sql.ErrNoRows || !myScore.Valid {
-			classScores.classScores = append(classScores.classScores, ClassScore{
-				ClassID:    classWithCourse.Class.ID,
-				Part:       classWithCourse.Class.Part,
-				Title:      classWithCourse.Class.Title,
-				Score:      nil,
-				Submitters: submissionsCount,
-			})
-		} else {
-			score := int(myScore.Int64)
-			classScores.myTotalScore += score
-			classScores.classScores = append(classScores.classScores, ClassScore{
-				ClassID:    classWithCourse.Class.ID,
-				Part:       classWithCourse.Class.Part,
-				Title:      classWithCourse.Class.Title,
-				Score:      &score,
-				Submitters: submissionsCount,
-			})
+			var myScore sql.NullInt64
+			// TODO: N+1 (gnu)
+			if err := h.DB.Get(&myScore, "SELECT `submissions`.`score` FROM `submissions` WHERE `user_id` = ? AND `class_id` = ?", userID, classWithCourse.Class.ID); err != nil && err != sql.ErrNoRows {
+				c.Logger().Error(err)
+				return c.NoContent(http.StatusInternalServerError)
+			} else if err == sql.ErrNoRows || !myScore.Valid {
+				classScores.classScores = append(classScores.classScores, ClassScore{
+					ClassID:    *classWithCourse.Class.ID,
+					Part:       *classWithCourse.Class.Part,
+					Title:      *classWithCourse.Class.Title,
+					Score:      nil,
+					Submitters: submissionsCount,
+				})
+			} else {
+				score := int(myScore.Int64)
+				classScores.myTotalScore += score
+				classScores.classScores = append(classScores.classScores, ClassScore{
+					ClassID:    *classWithCourse.Class.ID,
+					Part:       *classWithCourse.Class.Part,
+					Title:      *classWithCourse.Class.Title,
+					Score:      &score,
+					Submitters: submissionsCount,
+				})
+			}
 		}
 		classScores.Course = classWithCourse.Course
 		courseDict[classWithCourse.Course.ID] = classScores
@@ -1244,10 +1246,10 @@ func (h *handlers) AddClass(c echo.Context) error {
 				c.Logger().Error(err)
 				return c.NoContent(http.StatusInternalServerError)
 			}
-			if req.Title != class.Title || req.Description != class.Description {
+			if req.Title != *class.Title || req.Description != *class.Description {
 				return c.String(http.StatusConflict, "A class with the same part already exists.")
 			}
-			return c.JSON(http.StatusCreated, AddClassResponse{ClassID: class.ID})
+			return c.JSON(http.StatusCreated, AddClassResponse{ClassID: *class.ID})
 		}
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
