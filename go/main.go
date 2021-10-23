@@ -40,6 +40,7 @@ const (
 
 type handlers struct {
 	DB *sqlx.DB
+	Replica *sqlx.DB
 }
 
 type UserSession struct {
@@ -99,11 +100,15 @@ func main() {
 	e.Use(session.Middleware(sessions.NewCookieStore([]byte("trapnomura"))))
 
 	db, _ := GetDB(false)
+	replica, _ := GetReplica(false)
 	db.SetMaxOpenConns(300)
 	db.SetMaxIdleConns(300)
+	replica.SetMaxOpenConns(300)
+	replica.SetMaxIdleConns(300)
 
 	h := &handlers{
 		DB: db,
+		Replica: replica,
 	}
 
 	e.POST("/initialize", h.Initialize)
@@ -1179,7 +1184,7 @@ func (h *handlers) GetClasses(c echo.Context) error {
 		" LEFT JOIN `submissions` ON `classes`.`id` = `submissions`.`class_id` AND `submissions`.`user_id` = ?" +
 		" WHERE `classes`.`course_id` = ?" +
 		" ORDER BY `classes`.`part`"
-	if err := h.DB.Select(&classes, query, userID, courseID); err != nil {
+	if err := h.Replica.Select(&classes, query, userID, courseID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
