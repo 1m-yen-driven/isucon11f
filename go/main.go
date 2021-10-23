@@ -1473,7 +1473,7 @@ func (h *handlers) DownloadSubmittedAssignments(c echo.Context) error {
 	classID := c.Param("classID")
 	// クラスは増えるのみなのでtx不要
 	var classCount int
-	if err := h.Replica.Get(&classCount, "SELECT COUNT(*) FROM `classes` WHERE `id` = ?", classID); err != nil {
+	if err := h.DB.Get(&classCount, "SELECT COUNT(*) FROM `classes` WHERE `id` = ?", classID); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
