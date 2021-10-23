@@ -67,21 +67,28 @@ func DecodePtrSliceCmdElem(partsOfSliceCmd interface{}, valuePtr interface{}) {
 	msgpack.Decode([]byte(partsOfSliceCmd.(string)), valuePtr)
 }
 
+// unread_announcements
 var rdb0 = redis.NewClient(&redis.Options{
 	Addr: "172.31.47.193:6379",
 	DB:   0, // 0 - 15
 })
 
-// key: courseID value, status
+// key: course-ID / value: status
 var rdb1 = redis.NewClient(&redis.Options{
 	Addr: "172.31.47.193:6379",
 	DB:   1, // 0 - 15
 })
 
-// key: classID value, status
+// key: class-ID / value: submission_closed
 var rdb2 = redis.NewClient(&redis.Options{
 	Addr: "172.31.47.193:6379",
 	DB:   2, // 0 - 15
+})
+
+// courseID + "=" + userID -> submitted[]
+var rdb3 = redis.NewClient(&redis.Options{
+	Addr: "172.31.47.193:6379",
+	DB:   3, // 0 - 15
 })
 
 var sessionCache = sync.Map{}
@@ -180,6 +187,8 @@ func (h *handlers) Initialize(c echo.Context) error {
 	{
 		unreads := []UnreadAnnouncements{}
 		h.DB.Select(&unreads, "SELECT * FROM `unread_announcements`")
+
+		// rdb0
 		rdb0.FlushDB(ctx)
 		pipe := rdb0.Pipeline()
 		defer pipe.Close()
@@ -191,12 +200,51 @@ func (h *handlers) Initialize(c echo.Context) error {
 		}
 		pipe.Exec(ctx)
 	}
-
 	{
+		courses := []Course{}
+		h.DB.Select(&courses, "SELECT * FROM `courses`")
+		// rdb1
 		rdb1.FlushDB(ctx)
+		pipe := rdb1.Pipeline()
+		defer pipe.Close()
+		for _, course := range courses {
+			pipe.Set(ctx, course.ID, course.Status, 0)
+		}
+		pipe.Exec(ctx)
 	}
 	{
 		rdb2.FlushDB(ctx)
+	}
+	{
+		type SubmitWithUser struct {
+			ID               string `db:"id"`
+			CourseID         string `db:"course_id"`
+			UserID           string `db:"user_id"`
+			Part             uint8  `db:"part"`
+			Title            string `db:"title"`
+			Description      string `db:"description"`
+			SubmissionClosed bool   `db:"submission_closed"`
+			Submitted        bool   `db:"submitted"`
+		}
+		var submits []SubmitWithUser
+		query := "SELECT `classes`.*, `user_id`" +
+			" FROM `classes`" +
+			" LEFT JOIN `submissions` ON `classes`.`id` = `submissions`.`class_id`" +
+			" ORDER BY `classes`.`part`"
+		if err := h.DB.Select(&submits, query); err != nil {
+			c.Logger().Error(err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+		// rdb3
+		rdb3.FlushDB(ctx)
+		pipe := rdb3.Pipeline()
+		defer pipe.Close()
+		for _, submit := range submits {
+			key := submit.CourseID + "=" + submit.UserID
+			value := EncodePtr(&submit)
+			pipe.RPush(ctx, key, value)
+		}
+		pipe.Exec(ctx)
 	}
 	// アプリ複数台のときは初期化されないことがないか気をつけること
 	sessionCache = sync.Map{}
@@ -338,14 +386,14 @@ type User struct {
 	Type           UserType `db:"type"`
 }
 
-type CourseType string
+type CourseType = string
 
 const (
 	LiberalArts   CourseType = "liberal-arts"
 	MajorSubjects CourseType = "major-subjects"
 )
 
-type DayOfWeek string
+type DayOfWeek = string
 
 const (
 	Monday    DayOfWeek = "monday"
@@ -357,7 +405,7 @@ const (
 
 var daysOfWeek = []DayOfWeek{Monday, Tuesday, Wednesday, Thursday, Friday}
 
-type CourseStatus string
+type CourseStatus = string
 
 const (
 	StatusRegistration CourseStatus = "registration"
@@ -1057,14 +1105,15 @@ func (h *handlers) AddCourse(c echo.Context) error {
 			if req.Type != course.Type || req.Name != course.Name || req.Description != course.Description || req.Credit != int(course.Credit) || req.Period != int(course.Period) || req.DayOfWeek != course.DayOfWeek || req.Keywords != course.Keywords {
 				return c.String(http.StatusConflict, "A course with the same code already exists.")
 			}
+
+			rdb1.Set(c.Request().Context(), courseID, StatusRegistration, 0)
 			return c.JSON(http.StatusCreated, AddCourseResponse{ID: course.ID})
 		}
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	rdb1.Set(c.Request().Context(), courseID, StatusRegistration, 0).Result()
-
+	rdb1.Set(c.Request().Context(), courseID, StatusRegistration, 0)
 	return c.JSON(http.StatusCreated, AddCourseResponse{ID: courseID})
 }
 
@@ -1115,12 +1164,7 @@ func (h *handlers) SetCourseStatus(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "Invalid format.")
 	}
 	// coursesはinsertのみなのでTransactionは不要
-	var count int
-	if err := h.DB.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ? FOR UPDATE", courseID); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	if count == 0 {
+	if rdb1.Get(c.Request().Context(), courseID).Err() != nil {
 		return c.String(http.StatusNotFound, "No such course.")
 	}
 
@@ -1128,7 +1172,7 @@ func (h *handlers) SetCourseStatus(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-	if _, err := rdb1.Set(c.Request().Context(), courseID, string(req.Status), 0).Result(); err != nil {
+	if err := rdb1.Set(c.Request().Context(), courseID, req.Status, 0).Err(); err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
@@ -1164,12 +1208,7 @@ func (h *handlers) GetClasses(c echo.Context) error {
 
 	courseID := c.Param("courseID")
 	// courses は増えることはあっても消えることはないのでTransactionは不要
-	var count int
-	if err := h.DB.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ?", courseID); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	if count == 0 {
+	if rdb1.Get(c.Request().Context(), courseID).Err() != nil {
 		return c.String(http.StatusNotFound, "No such course.")
 	}
 
@@ -1329,25 +1368,9 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 
 	status, err := rdb1.Get(c.Request().Context(), courseID).Result()
 	if err != nil {
-		if err == redis.Nil {
-			var status CourseStatus
-			if err := h.DB.Get(&status, "SELECT `status` FROM `courses` WHERE `id` = ? FOR SHARE", courseID); err != nil && err != sql.ErrNoRows {
-				c.Logger().Error(err)
-				return c.NoContent(http.StatusInternalServerError)
-			} else if err == sql.ErrNoRows {
-				return c.String(http.StatusNotFound, "No such course.")
-			}
-			_, err = rdb1.Set(c.Request().Context(), courseID, StatusInProgress, 0).Result()
-			if status != StatusInProgress {
-				return c.String(http.StatusBadRequest, "This course is not in progress.")
-			}
-			if err != nil {
-				c.Logger().Error(err)
-			}
-		}
-		return c.NoContent(http.StatusInternalServerError)
+		return c.String(http.StatusNotFound, "No such course.")
 	} else {
-		if status != string(StatusInProgress) {
+		if status != StatusInProgress {
 			return c.String(http.StatusBadRequest, "This course is not in progress.")
 		}
 	}
@@ -1673,13 +1696,8 @@ func (h *handlers) AddAnnouncement(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.String(http.StatusBadRequest, "Invalid format.")
 	}
-	// coursesは増えるのみなのでtx不要
-	var count int
-	if err := h.DB.Get(&count, "SELECT COUNT(*) FROM `courses` WHERE `id` = ?", req.CourseID); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	if count == 0 {
+	// courses は増えることはあっても消えることはないのでTransactionは不要
+	if rdb1.Get(c.Request().Context(), req.CourseID).Err() != nil {
 		return c.String(http.StatusNotFound, "No such course.")
 	}
 
