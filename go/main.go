@@ -1293,6 +1293,40 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 	courseID := c.Param("courseID")
 	classID := c.Param("classID")
 
+	registrationCountCh := make(chan int, 2)
+	go func() {
+		// 科目を履修してるか :: courseとclassの期限チェックを優先してエラーを返さないといけない
+		var registrationCount int
+		if err := h.DB.Get(&registrationCount, "SELECT 1 FROM `registrations` WHERE `user_id` = ? AND `course_id` = ? LIMIT 1", userID, courseID); err != nil {
+			c.Logger().Error(err)
+			if errors.Is(err, sql.ErrNoRows) {
+				registrationCountCh <- 0
+				return
+			}
+			registrationCountCh <- -1
+			return
+		}
+		registrationCountCh <- registrationCount
+	}()
+
+	type FormFile struct {
+		data     []byte
+		filename string
+		err      error
+	}
+	formFileCh := make(chan FormFile, 2)
+	go func() {
+		file, header, err := c.Request().FormFile("file")
+		if err != nil {
+			formFileCh <- FormFile{err: err}
+			return
+		}
+		defer file.Close()
+
+		data, err := myReadAll(file)
+		formFileCh <- FormFile{data: data, filename: header.Filename, err: nil}
+	}()
+
 	tx, err := h.DB.Beginx()
 	if err != nil {
 		c.Logger().Error(err)
@@ -1325,16 +1359,6 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 		}
 	}
 
-	// 科目を履修してるか
-	var registrationCount int
-	if err := tx.Get(&registrationCount, "SELECT COUNT(*) FROM `registrations` WHERE `user_id` = ? AND `course_id` = ?", userID, courseID); err != nil {
-		c.Logger().Error(err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	if registrationCount == 0 {
-		return c.String(http.StatusBadRequest, "You have not taken this course.")
-	}
-
 	submissionClosedString, err := rdb2.Get(c.Request().Context(), classID).Result()
 	if err != nil {
 		if err == redis.Nil {
@@ -1360,18 +1384,23 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 		}
 	}
 
-	file, header, err := c.Request().FormFile("file")
-	if err != nil {
-		return c.String(http.StatusBadRequest, "Invalid file.")
-	}
-	defer file.Close()
-
-	if _, err := tx.Exec("INSERT INTO `submissions` (`user_id`, `user_code`, `class_id`, `file_name`) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE `file_name` = VALUES(`file_name`)", userID, userCode, classID, header.Filename); err != nil {
-		c.Logger().Error(err)
+	registrationCount := <-registrationCountCh
+	if registrationCount == 0 {
+		return c.String(http.StatusBadRequest, "You have not taken this course.")
+	} else if registrationCount < 0 {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	data, err := myReadAll(file)
+	formFile := <-formFileCh
+	if formFile.err != nil {
+		c.Logger().Error(formFile.err)
+		return c.String(http.StatusBadRequest, "Invalid file.")
+	}
+
+	if _, err := tx.Exec("INSERT INTO `submissions` (`user_id`, `user_code`, `class_id`, `file_name`) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE `file_name` = VALUES(`file_name`)", userID, userCode, classID, formFile.filename); err != nil {
+		c.Logger().Error(err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
 
 	if err != nil {
 		c.Logger().Error(err)
@@ -1385,7 +1414,7 @@ func (h *handlers) SubmitAssignment(c echo.Context) error {
 
 	go func() {
 		dst := AssignmentsDirectory + classID + "-" + userID + ".pdf"
-		if err := os.WriteFile(dst, data, 0666); err != nil {
+		if err := os.WriteFile(dst, formFile.data, 0666); err != nil {
 			c.Logger().Error(err)
 			// return c.NoContent(http.StatusInternalServerError)
 		}
