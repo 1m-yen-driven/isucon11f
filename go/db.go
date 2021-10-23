@@ -25,7 +25,7 @@ func GetDB(batch bool) (*sqlx.DB, error) {
 func GetReplica(batch bool) (*sqlx.DB, error) {
 	mysqlConfig := mysql.NewConfig()
 	mysqlConfig.Net = "tcp"
-	mysqlConfig.Addr = GetEnv("MYSQL_HOSTNAME", "app3") + ":" + GetEnv("MYSQL_PORT", "3306")
+	mysqlConfig.Addr = "app3" + ":" + GetEnv("MYSQL_PORT", "3306")
 	mysqlConfig.User = GetEnv("MYSQL_USER", "isucon")
 	mysqlConfig.Passwd = GetEnv("MYSQL_PASS", "isucon")
 	mysqlConfig.DBName = GetEnv("MYSQL_DATABASE", "isucholar")
