@@ -82,7 +82,7 @@ CREATE TABLE `class_scores`
     `class_id` CHAR(26) NOT NULL,
     `score` INT UNSIGNED NOT NULL,
     PRIMARY KEY (`course_id`, `class_id`)
-)
+);
 
 CREATE TABLE `announcements`
 (
